@@ -2,7 +2,7 @@
 body { background-color: #f8fafc; color: #0f172a; -webkit-font-smoothing: antialiased; }
 button { border: none; background: transparent; cursor: pointer; font-family: inherit; }
 
-.app-layout { min-height: 100vh; padding-bottom: 80px; }
+.app-layout { min-height: 100vh; padding-bottom: 100px; }
 
 /* Login Screen */
 .loading-screen { display: flex; align-items: center; justify-content: center; height: 100vh; font-weight: bold; color: #64748b; }
@@ -40,6 +40,11 @@ button { border: none; background: transparent; cursor: pointer; font-family: in
 .center { text-align: center; }
 .mb-0 { margin-bottom: 0; border: none; padding: 0; }
 .text-muted { color: #64748b; font-size: 14px; }
+
+/* Settings (Configurações de Fornecedores) */
+.settings-card { background: white; padding: 16px; border-radius: 12px; border: 1px solid #e2e8f0; margin-top: 8px; }
+.email-list { display: flex; flex-direction: column; gap: 8px; margin-top: 16px; }
+.email-item { display: flex; justify-content: space-between; align-items: center; background: #f8fafc; padding: 12px; border-radius: 8px; border: 1px solid #e2e8f0; font-size: 14px; font-weight: 600; color: #334155; }
 
 /* Dashboard Stats */
 .stats-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
@@ -80,7 +85,7 @@ button { border: none; background: transparent; cursor: pointer; font-family: in
 .photo-preview { width: 100%; height: 100%; object-fit: cover; }
 .photo-input { position: absolute; inset: 0; width: 100%; height: 100%; opacity: 0; cursor: pointer; }
 
-.btn-primary { width: 100%; background: #4f46e5; color: white; padding: 16px; border-radius: 12px; font-size: 16px; font-weight: bold; margin-top: 10px; transition: 0.2s; box-shadow: 0 4px 6px -1px rgba(79, 70, 229, 0.2); }
+.btn-primary { width: 100%; background: #4f46e5; color: white; padding: 16px; border-radius: 12px; font-size: 16px; font-weight: bold; margin-top: 10px; transition: 0.2s; box-shadow: 0 4px 6px -1px rgba(79, 70, 229, 0.2); cursor: pointer;}
 .btn-primary:active { transform: scale(0.98); }
 
 /* Filters & Checklist View */
@@ -103,13 +108,18 @@ button { border: none; background: transparent; cursor: pointer; font-family: in
 .item-content { flex: 1; display: flex; flex-direction: column; justify-content: space-between; }
 .item-header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 4px; }
 .tag-discipline { background: #e0e7ff; color: #3730a3; font-size: 12px; font-weight: bold; padding: 2px 8px; border-radius: 4px; }
-.btn-delete { color: #f87171; padding: 4px; } .btn-delete:hover { color: #ef4444; }
 
 .item-desc { font-size: 14px; font-weight: 500; color: #1e293b; line-height: 1.4; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
 .item-loc { font-size: 12px; color: #64748b; margin-top: 4px; }
 
-.item-actions { display: flex; gap: 16px; margin-top: 12px; padding-top: 12px; border-top: 1px solid #e2e8f0; }
-.check-btn { display: flex; align-items: center; gap: 6px; font-size: 14px; font-weight: 600; color: #94a3b8; transition: 0.2s; }
+/* Nova Área de Ações e Botões de Ícone */
+.item-actions { display: flex; gap: 12px; margin-top: 12px; padding-top: 12px; border-top: 1px solid #e2e8f0; align-items: center; flex-wrap: wrap; }
+.spacer { flex: 1; min-width: 20px; }
+.btn-icon { background: transparent; border: none; cursor: pointer; display: flex; align-items: center; justify-content: center; padding: 6px; border-radius: 6px; transition: 0.2s; }
+.btn-icon:hover { background: #f1f5f9; }
+.text-blue { color: #3b82f6; }
+
+.check-btn { display: flex; align-items: center; gap: 6px; font-size: 13px; font-weight: 600; color: #94a3b8; transition: 0.2s; }
 .check-btn.disabled { opacity: 0.5; cursor: not-allowed; }
 .check-btn.checked-partner { color: #d97706; }
 .check-btn.checked-manager { color: #059669; }
@@ -120,7 +130,7 @@ button { border: none; background: transparent; cursor: pointer; font-family: in
 
 /* Bottom Navigation */
 .bottom-nav { position: fixed; bottom: 0; left: 0; width: 100%; background: white; border-top: 1px solid #e2e8f0; display: flex; justify-content: space-around; padding: 12px 0 20px 0; z-index: 20; box-shadow: 0 -4px 6px -1px rgba(0,0,0,0.05); }
-.bottom-nav button { display: flex; flex-direction: column; align-items: center; gap: 4px; color: #94a3b8; width: 80px; transition: 0.2s; }
+.bottom-nav button { display: flex; flex-direction: column; align-items: center; gap: 4px; color: #94a3b8; width: 100%; transition: 0.2s; }
 .bottom-nav button span { font-size: 10px; font-weight: bold; text-transform: uppercase; letter-spacing: 0.5px; }
 .bottom-nav button.active { color: #4f46e5; }
 
