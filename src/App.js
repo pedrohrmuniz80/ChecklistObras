@@ -1,10 +1,10 @@
 import React, { useState, useEffect } from 'react';
 import { initializeApp } from 'firebase/app';
 import { getAuth, signInWithEmailAndPassword, signOut, onAuthStateChanged } from 'firebase/auth';
-import { getFirestore, collection, onSnapshot, addDoc, updateDoc, deleteDoc, doc } from 'firebase/firestore';
+import { getFirestore, collection, onSnapshot, addDoc, updateDoc, deleteDoc, doc, setDoc } from 'firebase/firestore';
 import { 
   Camera, CheckCircle, Circle, AlertCircle, Trash2, 
-  FileText, ArrowLeft, BarChart3, Filter, Printer, User, Building2, LogOut
+  FileText, ArrowLeft, BarChart3, Filter, Printer, User, Building2, LogOut, Pencil, Settings, X
 } from 'lucide-react';
 import './App.css';
 
@@ -25,14 +25,13 @@ const db = getFirestore(app);
 const collectionPath = 'checklists';
 
 // --- 2. DEFINIÇÃO DE PERFIS ---
-// Coloque aqui os e-mails das pessoas da SUA EQUIPE (que podem dar o OK Final e apagar itens)
+// E-mails da SUA EQUIPE (Gerentes com acesso total)
 const EMAILS_GERENCIA = [
   'pedro.ctr@deville.com.br',
   'stephanie.ctr@deville.com.br',
   'alan.ctr@deville.com.br',
   'raphael.ctr@deville.com.br',
   'jessica.ctr@deville.com.br'
-
 ];
 
 // --- 3. DADOS FIXOS DAS OBRAS ---
@@ -57,12 +56,14 @@ const DISCIPLINES = ['Civil', 'Pintura', 'Hidráulica', 'Elétrica', 'Manutenç�
 
 // --- 4. COMPONENTE PRINCIPAL ---
 export default function App() {
-  // Estados de Autenticação
   const [user, setUser] = useState(null);
-  const [role, setRole] = useState('partner'); // Default é partner
+  const [role, setRole] = useState('partner');
   const [loginEmail, setLoginEmail] = useState('');
   const [loginPassword, setLoginPassword] = useState('');
   const [loadingAuth, setLoadingAuth] = useState(true);
+
+  // Controle de Permissões das Obras (Firebase)
+  const [projectAccess, setProjectAccess] = useState({});
 
   // Estados de Navegação
   const [view, setView] = useState('dashboard'); 
@@ -70,53 +71,67 @@ export default function App() {
   const [selectedStage, setSelectedStage] = useState(null);
   const [selectedLocation, setSelectedLocation] = useState(null);
   
+  // Filtros Dashboard e Config
+  const [dashboardProject, setDashboardProject] = useState('all');
+  const [configProject, setConfigProject] = useState(null);
+  const [newPartnerEmail, setNewPartnerEmail] = useState('');
+
   // Estado de Dados
   const [items, setItems] = useState([]);
+  const [editingItemId, setEditingItemId] = useState(null);
   const [photo, setPhoto] = useState(null);
   const [description, setDescription] = useState('');
   const [discipline, setDiscipline] = useState('');
 
-  // Filtros
+  // Filtros de Lista
   const [statusFilter, setStatusFilter] = useState('all'); 
   const [disciplineFilter, setDisciplineFilter] = useState('all');
 
-  // Monitora o estado de Login
+  // Monitorização em tempo real (Itens e Permissões)
   useEffect(() => {
     let unsubscribeSnap = null;
+    let unsubscribeAccess = null;
 
     const unsubscribeAuth = onAuthStateChanged(auth, (currentUser) => {
       setUser(currentUser);
       setLoadingAuth(false);
 
       if (currentUser) {
-        // Define o perfil baseado no e-mail logado
-        if (EMAILS_GERENCIA.includes(currentUser.email)) {
+        if (EMAILS_GERENCIA.includes(currentUser.email.toLowerCase())) {
           setRole('manager');
         } else {
           setRole('partner');
         }
 
-        // Carrega os dados
+        // Carrega as vistorias
         const q = collection(db, collectionPath);
         unsubscribeSnap = onSnapshot(q, (snapshot) => {
           const dadosFirebase = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
           dadosFirebase.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
           setItems(dadosFirebase);
-        }, (err) => {
-          console.error("Erro ao ler dados:", err);
         });
+
+        // Carrega as permissões de obras
+        const qAccess = collection(db, 'project_access');
+        unsubscribeAccess = onSnapshot(qAccess, (snapshot) => {
+          const accessMap = {};
+          snapshot.docs.forEach(doc => { accessMap[doc.id] = doc.data().authorizedEmails || []; });
+          setProjectAccess(accessMap);
+        });
+
       } else {
         if (unsubscribeSnap) unsubscribeSnap();
+        if (unsubscribeAccess) unsubscribeAccess();
       }
     });
 
     return () => {
       unsubscribeAuth();
       if (unsubscribeSnap) unsubscribeSnap();
+      if (unsubscribeAccess) unsubscribeAccess();
     };
   }, []);
 
-  // Funções de Login / Logout
   const handleLogin = async (e) => {
     e.preventDefault();
     try {
@@ -126,105 +141,110 @@ export default function App() {
     }
   };
 
-  const handleLogout = () => {
-    signOut(auth);
-  };
+  const handleLogout = () => signOut(auth);
 
-  // --- FUNÇÕES DE AÇÃO NA BASE DE DADOS ---
+  // --- OBRAS VISÍVEIS BASEADAS NO PERFIL ---
+  const visibleProjects = role === 'manager' 
+    ? INITIAL_PROJECTS 
+    : INITIAL_PROJECTS.filter(p => (projectAccess[p.id] || []).includes(user?.email.toLowerCase()));
 
+  // Itens visíveis (garante que parceiro só vê da obra dele)
+  const visibleItems = items.filter(i => visibleProjects.some(p => p.id === i.projectId));
+
+  // --- FUNÇÕES DA BASE DE DADOS ---
   const handlePhotoUpload = (e, callback) => {
     const file = e.target.files[0];
     if (!file) return;
     
     const reader = new FileReader();
     reader.onloadend = () => {
-      // --- INÍCIO DA COMPRESSÃO DE IMAGEM AUTOMÁTICA ---
       const img = new Image();
       img.onload = () => {
         const canvas = document.createElement('canvas');
-        const MAX_WIDTH = 800; // Limita a resolução
-        const MAX_HEIGHT = 800;
-        let width = img.width;
-        let height = img.height;
+        const MAX_WIDTH = 800; const MAX_HEIGHT = 800;
+        let width = img.width; let height = img.height;
 
-        if (width > height) {
-          if (width > MAX_WIDTH) {
-            height *= MAX_WIDTH / width;
-            width = MAX_WIDTH;
-          }
-        } else {
-          if (height > MAX_HEIGHT) {
-            width *= MAX_HEIGHT / height;
-            height = MAX_HEIGHT;
-          }
-        }
+        if (width > height) { if (width > MAX_WIDTH) { height *= MAX_WIDTH / width; width = MAX_WIDTH; } } 
+        else { if (height > MAX_HEIGHT) { width *= MAX_HEIGHT / height; height = MAX_HEIGHT; } }
 
-        canvas.width = width;
-        canvas.height = height;
+        canvas.width = width; canvas.height = height;
         const ctx = canvas.getContext('2d');
         ctx.drawImage(img, 0, 0, width, height);
-        
-        // Comprime para formato JPEG leve
-        const compressedBase64 = canvas.toDataURL('image/jpeg', 0.7);
-        callback(compressedBase64);
+        callback(canvas.toDataURL('image/jpeg', 0.7));
       };
       img.src = reader.result;
-      // --- FIM DA COMPRESSÃO ---
     };
     reader.readAsDataURL(file);
   };
 
-  const addItem = async (newItem) => {
+  const saveItem = async () => {
+    if (!photo || !description || !discipline) {
+      alert("Preencha todos os campos e anexe uma foto.");
+      return;
+    }
+
     try {
-      await addDoc(collection(db, collectionPath), { 
-        ...newItem, 
-        createdAt: new Date().toISOString(),
-        authorEmail: user.email // Salva quem criou
-      });
+      if (editingItemId) {
+        await updateDoc(doc(db, collectionPath, editingItemId), {
+          photoUrl: photo,
+          description,
+          discipline,
+          updatedAt: new Date().toISOString()
+        });
+      } else {
+        await addDoc(collection(db, collectionPath), { 
+          projectId: selectedProject.id,
+          stageId: selectedStage.id,
+          locationId: selectedLocation,
+          photoUrl: photo,
+          description,
+          discipline,
+          partnerFixed: false,
+          managerApproved: false,
+          createdAt: new Date().toISOString(),
+          authorEmail: user.email
+        });
+      }
       setView('list');
-      setPhoto(null);
-      setDescription('');
-      setDiscipline('');
+      setPhoto(null); setDescription(''); setDiscipline(''); setEditingItemId(null);
     } catch (e) {
-      console.error("Erro ao adicionar:", e);
+      console.error("Erro ao guardar:", e);
       alert("Erro ao guardar item.");
     }
   };
 
+  const handleEdit = (item) => {
+    setSelectedProject(INITIAL_PROJECTS.find(p => p.id === item.projectId));
+    setSelectedStage(STAGES[item.projectId]?.find(s => s.id === item.stageId));
+    setSelectedLocation(item.locationId);
+    setPhoto(item.photoUrl);
+    setDescription(item.description);
+    setDiscipline(item.discipline);
+    setEditingItemId(item.id);
+    setView('form');
+  };
+
   const togglePartnerFixed = async (item) => {
     if (item.managerApproved) return;
-    try {
-      await updateDoc(doc(db, collectionPath, item.id), { partnerFixed: !item.partnerFixed });
-    } catch (e) {
-      console.error("Erro ao atualizar:", e);
-    }
+    try { await updateDoc(doc(db, collectionPath, item.id), { partnerFixed: !item.partnerFixed }); } 
+    catch (e) { console.error("Erro ao atualizar:", e); }
   };
 
   const toggleManagerApproved = async (item) => {
     if (role !== 'manager') return;
-    try {
-      await updateDoc(doc(db, collectionPath, item.id), { managerApproved: !item.managerApproved });
-    } catch (e) {
-      console.error("Erro ao atualizar:", e);
-    }
+    try { await updateDoc(doc(db, collectionPath, item.id), { managerApproved: !item.managerApproved }); } 
+    catch (e) { console.error("Erro ao atualizar:", e); }
   };
 
   const deleteItem = async (id) => {
     if (role !== 'manager') return;
-    if(window.confirm("Tem certeza que deseja apagar este item?")) {
-      try {
-        await deleteDoc(doc(db, collectionPath, id));
-      } catch (e) {
-        console.error("Erro ao remover:", e);
-      }
+    if(window.confirm("Tem certeza que deseja apagar este item permanentemente?")) {
+      try { await deleteDoc(doc(db, collectionPath, id)); } 
+      catch (e) { console.error("Erro ao remover:", e); }
     }
   };
 
-  const printPDF = () => {
-    window.print();
-  };
-
-  // --- TELA DE LOGIN ---
+  // --- TELAS ---
   if (loadingAuth) return <div className="loading-screen">Carregando...</div>;
 
   if (!user) {
@@ -234,24 +254,9 @@ export default function App() {
           <Building2 size={48} className="login-icon" />
           <h1 className="login-title">Vistoria<span>PRO</span></h1>
           <p className="login-subtitle">Gestão de Checklists de Obras</p>
-          
           <form className="login-form" onSubmit={handleLogin}>
-            <input 
-              type="email" 
-              placeholder="Seu E-mail" 
-              className="login-input"
-              value={loginEmail}
-              onChange={(e) => setLoginEmail(e.target.value)}
-              required
-            />
-            <input 
-              type="password" 
-              placeholder="Sua Senha" 
-              className="login-input"
-              value={loginPassword}
-              onChange={(e) => setLoginPassword(e.target.value)}
-              required
-            />
+            <input type="email" placeholder="Seu E-mail" className="login-input" value={loginEmail} onChange={(e) => setLoginEmail(e.target.value)} required />
+            <input type="password" placeholder="Sua Senha" className="login-input" value={loginPassword} onChange={(e) => setLoginPassword(e.target.value)} required />
             <button type="submit" className="btn-primary">Entrar no Sistema</button>
           </form>
         </div>
@@ -259,60 +264,51 @@ export default function App() {
     );
   }
 
-  // --- RENDERS DAS PÁGINAS ---
-
   const renderDashboard = () => {
-    const total = items.length;
-    const completed = items.filter(i => i.managerApproved).length;
+    const dashboardItems = dashboardProject === 'all' 
+      ? visibleItems 
+      : visibleItems.filter(i => i.projectId === dashboardProject);
+
+    const total = dashboardItems.length;
+    const completed = dashboardItems.filter(i => i.managerApproved).length;
     const pending = total - completed;
-    const partnerFixed = items.filter(i => i.partnerFixed && !i.managerApproved).length;
+    const partnerFixed = dashboardItems.filter(i => i.partnerFixed && !i.managerApproved).length;
     const progress = total === 0 ? 0 : Math.round((completed / total) * 100);
 
-    const discCount = items.reduce((acc, curr) => {
+    const discCount = dashboardItems.reduce((acc, curr) => {
       acc[curr.discipline] = (acc[curr.discipline] || 0) + 1;
       return acc;
     }, {});
-    
     const topDisciplines = Object.entries(discCount).sort((a, b) => b[1] - a[1]).slice(0, 4);
 
     return (
       <div className="page-container fade-in">
         <h2 className="section-title">Resumo Geral</h2>
         
+        <div className="filter-panel hide-print" style={{marginBottom: 8}}>
+          <select value={dashboardProject} onChange={(e) => setDashboardProject(e.target.value)} style={{width: '100%', padding: '10px', borderRadius: '8px', border: '1px solid #cbd5e1'}}>
+            <option value="all">Todas as Minhas Obras</option>
+            {visibleProjects.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
+          </select>
+        </div>
+        
         <div className="stats-grid">
-          <div className="stat-card">
-            <span className="stat-value">{total}</span>
-            <span className="stat-label">Total de Itens</span>
-          </div>
-          <div className="stat-card">
-            <span className="stat-value text-green">{progress}%</span>
-            <span className="stat-label">Concluído</span>
-          </div>
-          <div className="stat-card">
-            <span className="stat-value text-orange">{partnerFixed}</span>
-            <span className="stat-label">Aguardando Avaliação</span>
-          </div>
-          <div className="stat-card">
-            <span className="stat-value text-red">{pending - partnerFixed}</span>
-            <span className="stat-label">Pendentes</span>
-          </div>
+          <div className="stat-card"><span className="stat-value">{total}</span><span className="stat-label">Total Itens</span></div>
+          <div className="stat-card"><span className="stat-value text-green">{progress}%</span><span className="stat-label">Concluído</span></div>
+          <div className="stat-card"><span className="stat-value text-orange">{partnerFixed}</span><span className="stat-label">Aguardando Avaliação</span></div>
+          <div className="stat-card"><span className="stat-value text-red">{pending - partnerFixed}</span><span className="stat-label">Pendentes</span></div>
         </div>
 
         <div className="chart-card">
           <h3 className="chart-title"><BarChart3 size={20} /> Disciplinas Mais Recorrentes</h3>
-          {topDisciplines.length === 0 ? (
-            <p className="text-muted">Nenhum dado registado ainda.</p>
-          ) : (
+          {topDisciplines.length === 0 ? <p className="text-muted">Nenhum dado registado ainda.</p> : (
             <div className="chart-list">
               {topDisciplines.map(([disc, count], idx) => (
                 <div key={idx} className="chart-row">
                   <div className="chart-row-header">
-                    <span>{disc}</span>
-                    <span className="text-muted">{count} itens ({Math.round((count/total)*100)}%)</span>
+                    <span>{disc}</span><span className="text-muted">{count} itens ({Math.round((count/total)*100)}%)</span>
                   </div>
-                  <div className="progress-bar-bg">
-                    <div className="progress-bar-fill" style={{ width: `${(count/total)*100}%` }}></div>
-                  </div>
+                  <div className="progress-bar-bg"><div className="progress-bar-fill" style={{ width: `${(count/total)*100}%` }}></div></div>
                 </div>
               ))}
             </div>
@@ -322,11 +318,72 @@ export default function App() {
     );
   };
 
+  const renderSettings = () => {
+    return (
+      <div className="page-container fade-in">
+        <h2 className="section-title">Configurações de Acesso</h2>
+        <p className="text-muted mb-0">Selecione uma obra para adicionar os fornecedores/parceiros autorizados.</p>
+        
+        <div className="form-group">
+          <select value={configProject?.id || ''} onChange={(e) => setConfigProject(INITIAL_PROJECTS.find(p => p.id === e.target.value))}>
+            <option value="">Selecione a Obra...</option>
+            {INITIAL_PROJECTS.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
+          </select>
+        </div>
+
+        {configProject && (
+          <div className="settings-card">
+            <h3 className="chart-title mb-0">Fornecedores em: {configProject.name}</h3>
+            <div style={{display: 'flex', gap: '8px', marginBottom: '16px'}}>
+              <input 
+                type="email" placeholder="E-mail do fornecedor" className="login-input" style={{flex: 1, padding: '10px'}}
+                value={newPartnerEmail} onChange={(e) => setNewPartnerEmail(e.target.value)}
+              />
+              <button 
+                className="btn-primary" style={{width: 'auto', marginTop: 0, padding: '0 16px'}}
+                onClick={async () => {
+                  if(!newPartnerEmail) return;
+                  const email = newPartnerEmail.toLowerCase().trim();
+                  const currentList = projectAccess[configProject.id] || [];
+                  if(!currentList.includes(email)) {
+                    await setDoc(doc(db, 'project_access', configProject.id), { authorizedEmails: [...currentList, email] });
+                    setNewPartnerEmail('');
+                  }
+                }}
+              >
+                Adicionar
+              </button>
+            </div>
+
+            <div className="email-list">
+              {(projectAccess[configProject.id] || []).length === 0 ? (
+                <p className="text-muted">Nenhum fornecedor configurado nesta obra. (Só Gerentes podem ver)</p>
+              ) : (
+                (projectAccess[configProject.id] || []).map(email => (
+                  <div key={email} className="email-item">
+                    <span>{email}</span>
+                    <button onClick={async () => {
+                      const updated = (projectAccess[configProject.id] || []).filter(e => e !== email);
+                      await setDoc(doc(db, 'project_access', configProject.id), { authorizedEmails: updated });
+                    }} className="btn-icon text-red" title="Remover">
+                      <X size={18}/>
+                    </button>
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+        )}
+      </div>
+    );
+  };
+
   const renderProjects = () => (
     <div className="page-container fade-in">
       <h2 className="section-title">Selecione a Obra</h2>
       <div className="list-group">
-        {INITIAL_PROJECTS.map(proj => (
+        {visibleProjects.length === 0 && <p className="text-muted">Você não tem obras atribuídas.</p>}
+        {visibleProjects.map(proj => (
           <button key={proj.id} onClick={() => { setSelectedProject(proj); setView('stages'); }} className="list-item">
             <Building2 size={24} className="icon-blue" />
             <span className="list-text">{proj.name}</span>
@@ -340,8 +397,7 @@ export default function App() {
     const stages = STAGES[selectedProject?.id] || [];
     return (
       <div className="page-container fade-in">
-        <h2 className="section-title center">Etapas de {selectedProject?.name}</h2>
-        {stages.length === 0 ? <p className="text-muted center mt-2">Nenhuma etapa cadastrada.</p> : null}
+        <h2 className="section-title center">Etapas - {selectedProject?.name}</h2>
         <div className="list-group">
           {stages.map(stage => (
             <button key={stage.id} onClick={() => { setSelectedStage(stage); setView('locations'); }} className="list-item">
@@ -360,7 +416,7 @@ export default function App() {
         <h2 className="section-title center">{selectedStage?.name}</h2>
         <div className="grid-locations">
           {locations.map((loc, idx) => {
-            const locItems = items.filter(i => i.projectId === selectedProject.id && i.stageId === selectedStage.id && i.locationId === loc);
+            const locItems = visibleItems.filter(i => i.projectId === selectedProject.id && i.stageId === selectedStage.id && i.locationId === loc);
             const pending = locItems.filter(i => !i.managerApproved).length;
 
             return (
@@ -376,34 +432,15 @@ export default function App() {
   };
 
   const renderForm = () => {
-    const handleSubmit = () => {
-      if (!photo || !description || !discipline) return;
-      addItem({
-        projectId: selectedProject.id,
-        stageId: selectedStage.id,
-        locationId: selectedLocation,
-        photoUrl: photo,
-        description,
-        discipline,
-        partnerFixed: false,
-        managerApproved: false
-      });
-    };
-
     return (
       <div className="page-container fade-in">
-        <h2 className="section-title">Nova Não Conformidade</h2>
+        <h2 className="section-title">{editingItemId ? 'Editar Vistoria' : 'Nova Não Conformidade'}</h2>
         <p className="breadcrumb">{selectedProject.name} &gt; {selectedLocation}</p>
 
         <div className="form-group">
           <div className="photo-upload-area">
-            {photo ? (
-               <img src={photo} alt="Preview" className="photo-preview" />
-            ) : (
-              <div className="photo-placeholder">
-                <Camera size={48} />
-                <span>Toque para tirar foto</span>
-              </div>
+            {photo ? <img src={photo} alt="Preview" className="photo-preview" /> : (
+              <div className="photo-placeholder"><Camera size={48} /><span>Toque para tirar foto</span></div>
             )}
             <input type="file" accept="image/*" capture="environment" onChange={(e) => handlePhotoUpload(e, setPhoto)} className="photo-input" />
           </div>
@@ -422,17 +459,17 @@ export default function App() {
           </select>
         </div>
 
-        <button onClick={handleSubmit} className="btn-primary">Guardar Item</button>
+        <button onClick={saveItem} className="btn-primary">{editingItemId ? 'Atualizar Item' : 'Salvar Item'}</button>
       </div>
     );
   };
 
   const renderList = () => {
-    let filteredItems = items;
+    let filteredItems = visibleItems;
     if (selectedLocation) {
-      filteredItems = items.filter(i => i.projectId === selectedProject?.id && i.stageId === selectedStage?.id && i.locationId === selectedLocation);
+      filteredItems = visibleItems.filter(i => i.projectId === selectedProject?.id && i.stageId === selectedStage?.id && i.locationId === selectedLocation);
     } else if (selectedProject) {
-      filteredItems = items.filter(i => i.projectId === selectedProject.id);
+      filteredItems = visibleItems.filter(i => i.projectId === selectedProject.id);
     }
 
     if (statusFilter === 'pending') filteredItems = filteredItems.filter(i => !i.managerApproved);
@@ -451,7 +488,7 @@ export default function App() {
 
         <div className="list-header hide-print">
           <h2 className="section-title mb-0">{selectedLocation ? `Itens - ${selectedLocation}` : 'Todos os Itens'}</h2>
-          <button onClick={printPDF} className="btn-secondary"><Printer size={16}/> PDF</button>
+          <button onClick={() => window.print()} className="btn-secondary"><Printer size={16}/> PDF</button>
         </div>
 
         <div className="filter-panel hide-print">
@@ -462,17 +499,13 @@ export default function App() {
                 value={selectedProject?.id || 'all'} 
                 onChange={(e) => {
                   const projId = e.target.value;
-                  if (projId === 'all') {
-                    setSelectedProject(null);
-                  } else {
-                    setSelectedProject(INITIAL_PROJECTS.find(p => p.id === projId));
-                  }
-                  setSelectedStage(null);
-                  setSelectedLocation(null);
+                  if (projId === 'all') { setSelectedProject(null); } 
+                  else { setSelectedProject(INITIAL_PROJECTS.find(p => p.id === projId)); }
+                  setSelectedStage(null); setSelectedLocation(null);
                 }}
               >
-                <option value="all">Todas as Obras</option>
-                {INITIAL_PROJECTS.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
+                <option value="all">Todas as Minhas Obras</option>
+                {visibleProjects.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
               </select>
             )}
             <select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}>
@@ -499,35 +532,35 @@ export default function App() {
                 <div className="item-content">
                   <div className="item-header">
                     <span className="tag-discipline">{item.discipline}</span>
-                    {role === 'manager' && !item.managerApproved && (
-                      <button onClick={() => deleteItem(item.id)} className="btn-delete hide-print"><Trash2 size={16} /></button>
-                    )}
                   </div>
                   <p className="item-desc">{item.description}</p>
                   {!selectedLocation && (
                     <p className="item-loc">
-                      <strong>{INITIAL_PROJECTS.find(p => p.id === item.projectId)?.name}</strong> <br/>
-                      Local: {item.locationId}
+                      <strong>{INITIAL_PROJECTS.find(p => p.id === item.projectId)?.name}</strong><br/>Local: {item.locationId}
                     </p>
                   )}
                   
+                  {/* BOTÕES DE AÇÃO */}
                   <div className="item-actions">
-                    <button 
-                      onClick={() => togglePartnerFixed(item)} disabled={item.managerApproved}
-                      className={`check-btn ${item.partnerFixed ? 'checked-partner' : ''}`}
-                    >
+                    <button onClick={() => togglePartnerFixed(item)} disabled={item.managerApproved} className={`check-btn ${item.partnerFixed ? 'checked-partner' : ''}`}>
                       {item.partnerFixed ? <CheckCircle size={18} className="hide-print"/> : <Circle size={18} className="hide-print"/>}
-                      <span className="hide-print">Parceiro Corrigiu</span>
+                      <span className="hide-print">Corrigido</span>
                       <span className="hide-screen">Parceiro: {item.partnerFixed ? '[ X ]' : '[   ]'}</span>
                     </button>
-                    <button 
-                      onClick={() => toggleManagerApproved(item)} disabled={role === 'partner'}
-                      className={`check-btn ${item.managerApproved ? 'checked-manager' : ''} ${role === 'partner' ? 'disabled' : ''}`}
-                    >
+                    <button onClick={() => toggleManagerApproved(item)} disabled={role === 'partner'} className={`check-btn ${item.managerApproved ? 'checked-manager' : ''} ${role === 'partner' ? 'disabled' : ''}`}>
                       {item.managerApproved ? <CheckCircle size={18} className="hide-print"/> : <Circle size={18} className="hide-print"/>}
                       <span className="hide-print">OK Final</span>
                       <span className="hide-screen">Gerente: {item.managerApproved ? '[ X ]' : '[   ]'}</span>
                     </button>
+                    
+                    <div className="spacer"></div>
+
+                    {(!item.managerApproved || role === 'manager') && (
+                      <button onClick={() => handleEdit(item)} className="btn-icon text-blue hide-print" title="Editar Vistoria"><Pencil size={18}/></button>
+                    )}
+                    {role === 'manager' && (
+                      <button onClick={() => deleteItem(item.id)} className="btn-icon text-red hide-print" title="Excluir Definitivamente"><Trash2 size={18}/></button>
+                    )}
                   </div>
                 </div>
               </div>
@@ -536,7 +569,9 @@ export default function App() {
         </div>
 
         {selectedLocation && (
-           <button onClick={() => setView('form')} className="fab-btn hide-print">
+           <button onClick={() => {
+              setEditingItemId(null); setPhoto(null); setDescription(''); setDiscipline(''); setView('form');
+           }} className="fab-btn hide-print">
              <Camera size={24} />
            </button>
         )}
@@ -545,16 +580,16 @@ export default function App() {
   };
 
   const handleBack = () => {
-    if (view === 'form') setView('list');
+    if (view === 'form') { setView('list'); setEditingItemId(null); setPhoto(null); setDescription(''); setDiscipline(''); }
     else if (view === 'list' && selectedLocation) { setSelectedLocation(null); setView('locations'); }
     else if (view === 'list' && !selectedLocation) setView('projects');
     else if (view === 'locations') { setSelectedStage(null); setView('stages'); }
     else if (view === 'stages') { setSelectedProject(null); setView('projects'); }
+    else if (view === 'settings') { setView('dashboard'); setConfigProject(null); }
   };
 
   return (
     <div className="app-layout">
-      {/* HEADER DE PRODUÇÃO COM USUÁRIO E LOGOUT */}
       <header className="app-header hide-print">
         <div className="header-left">
           {view !== 'dashboard' && view !== 'projects' && (
@@ -566,7 +601,7 @@ export default function App() {
           <div className="user-info">
             <span className="user-email">{user.email.split('@')[0]}</span>
             <span className={`user-badge ${role === 'manager' ? 'badge-manager' : 'badge-partner'}`}>
-              {role === 'manager' ? 'Gerente' : 'Parceiro'}
+              {role === 'manager' ? 'Gerente' : 'Fornecedor'}
             </span>
           </div>
           <button onClick={handleLogout} className="btn-logout" title="Sair"><LogOut size={20} /></button>
@@ -580,6 +615,7 @@ export default function App() {
         {view === 'locations' && renderLocations()}
         {view === 'list' && renderList()}
         {view === 'form' && renderForm()}
+        {view === 'settings' && renderSettings()}
       </main>
 
       <nav className="bottom-nav hide-print">
@@ -592,6 +628,12 @@ export default function App() {
         <button onClick={() => { setView('list'); setSelectedProject(null); setSelectedStage(null); setSelectedLocation(null); }} className={view === 'list' && !selectedLocation ? 'active' : ''}>
           <FileText size={24} /><span>Checklists</span>
         </button>
+        
+        {role === 'manager' && (
+          <button onClick={() => { setView('settings'); setSelectedProject(null); setSelectedStage(null); setSelectedLocation(null); }} className={view === 'settings' ? 'active' : ''}>
+            <Settings size={24} /><span>Config</span>
+          </button>
+        )}
       </nav>
     </div>
   );
