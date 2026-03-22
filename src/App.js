@@ -32,6 +32,7 @@ const EMAILS_GERENCIA = [
   'alan.ctr@deville.com.br',
   'raphael.ctr@deville.com.br',
   'jessica.ctr@deville.com.br'
+
 ];
 
 // --- 3. DADOS FIXOS DAS OBRAS ---
@@ -133,11 +134,44 @@ export default function App() {
 
   const handlePhotoUpload = (e, callback) => {
     const file = e.target.files[0];
-    if (file) {
-      const reader = new FileReader();
-      reader.onloadend = () => callback(reader.result);
-      reader.readAsDataURL(file);
-    }
+    if (!file) return;
+    
+    const reader = new FileReader();
+    reader.onloadend = () => {
+      // --- INÍCIO DA COMPRESSÃO DE IMAGEM AUTOMÁTICA ---
+      const img = new Image();
+      img.onload = () => {
+        const canvas = document.createElement('canvas');
+        const MAX_WIDTH = 800; // Limita a resolução
+        const MAX_HEIGHT = 800;
+        let width = img.width;
+        let height = img.height;
+
+        if (width > height) {
+          if (width > MAX_WIDTH) {
+            height *= MAX_WIDTH / width;
+            width = MAX_WIDTH;
+          }
+        } else {
+          if (height > MAX_HEIGHT) {
+            width *= MAX_HEIGHT / height;
+            height = MAX_HEIGHT;
+          }
+        }
+
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext('2d');
+        ctx.drawImage(img, 0, 0, width, height);
+        
+        // Comprime para formato JPEG leve
+        const compressedBase64 = canvas.toDataURL('image/jpeg', 0.7);
+        callback(compressedBase64);
+      };
+      img.src = reader.result;
+      // --- FIM DA COMPRESSÃO ---
+    };
+    reader.readAsDataURL(file);
   };
 
   const addItem = async (newItem) => {
@@ -396,7 +430,7 @@ export default function App() {
   const renderList = () => {
     let filteredItems = items;
     if (selectedLocation) {
-      filteredItems = items.filter(i => i.projectId === selectedProject.id && i.stageId === selectedStage.id && i.locationId === selectedLocation);
+      filteredItems = items.filter(i => i.projectId === selectedProject?.id && i.stageId === selectedStage?.id && i.locationId === selectedLocation);
     } else if (selectedProject) {
       filteredItems = items.filter(i => i.projectId === selectedProject.id);
     }
@@ -408,11 +442,11 @@ export default function App() {
     return (
       <div className="page-container flex-col fade-in">
         <div className="print-header hide-screen">
-          <h1>Relatório de Vistoria</h1>
-          <p>Projeto: {selectedProject?.name || 'Todos'}</p>
-          {selectedStage && <p>Etapa: {selectedStage.name}</p>}
-          {selectedLocation && <p>Local: {selectedLocation}</p>}
-          <hr/>
+          <h2>Relatório de Vistoria</h2>
+          <h3>Obra: {selectedProject?.name || 'Múltiplas Obras'}</h3>
+          {selectedStage && <h4>Etapa: {selectedStage.name}</h4>}
+          {selectedLocation && <h4>Local: {selectedLocation}</h4>}
+          <hr style={{margin: '10px 0'}}/>
         </div>
 
         <div className="list-header hide-print">
@@ -423,6 +457,24 @@ export default function App() {
         <div className="filter-panel hide-print">
           <div className="filter-title"><Filter size={16} /> Filtros</div>
           <div className="filter-inputs">
+            {!selectedLocation && (
+              <select 
+                value={selectedProject?.id || 'all'} 
+                onChange={(e) => {
+                  const projId = e.target.value;
+                  if (projId === 'all') {
+                    setSelectedProject(null);
+                  } else {
+                    setSelectedProject(INITIAL_PROJECTS.find(p => p.id === projId));
+                  }
+                  setSelectedStage(null);
+                  setSelectedLocation(null);
+                }}
+              >
+                <option value="all">Todas as Obras</option>
+                {INITIAL_PROJECTS.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
+              </select>
+            )}
             <select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}>
               <option value="all">Todos os Status</option>
               <option value="pending">Em Andamento</option>
@@ -452,7 +504,12 @@ export default function App() {
                     )}
                   </div>
                   <p className="item-desc">{item.description}</p>
-                  {!selectedLocation && <p className="item-loc">{item.locationId}</p>}
+                  {!selectedLocation && (
+                    <p className="item-loc">
+                      <strong>{INITIAL_PROJECTS.find(p => p.id === item.projectId)?.name}</strong> <br/>
+                      Local: {item.locationId}
+                    </p>
+                  )}
                   
                   <div className="item-actions">
                     <button 

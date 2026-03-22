@@ -88,8 +88,8 @@ button { border: none; background: transparent; cursor: pointer; font-family: in
 .btn-secondary { display: flex; align-items: center; gap: 4px; background: #eef2ff; color: #4f46e5; padding: 6px 12px; border-radius: 8px; font-weight: 600; font-size: 14px; }
 .filter-panel { background: #f1f5f9; padding: 12px; border-radius: 12px; }
 .filter-title { font-size: 14px; font-weight: 600; color: #475569; display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
-.filter-inputs { display: flex; gap: 8px; }
-.filter-inputs select { flex: 1; padding: 8px; border-radius: 6px; border: 1px solid #cbd5e1; font-size: 14px; background: white; }
+.filter-inputs { display: flex; gap: 8px; flex-wrap: wrap; }
+.filter-inputs select { flex: 1; min-width: 130px; padding: 8px; border-radius: 6px; border: 1px solid #cbd5e1; font-size: 14px; background: white; }
 
 .checklist { display: flex; flex-direction: column; gap: 16px; flex: 1; }
 .empty-state { text-align: center; color: #94a3b8; padding: 40px 0; }
