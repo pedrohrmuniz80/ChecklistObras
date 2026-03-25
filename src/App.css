@@ -102,10 +102,10 @@ button { border: none; background: transparent; cursor: pointer; font-family: in
 /* Filters & Checklist View */
 .list-header { display: flex; justify-content: space-between; align-items: center; }
 .btn-secondary { display: flex; align-items: center; gap: 4px; background: #eef2ff; color: #4f46e5; padding: 6px 12px; border-radius: 8px; font-weight: 600; font-size: 14px; }
-.filter-panel { background: #f1f5f9; padding: 12px; border-radius: 12px; }
+.filter-panel { background: #f1f5f9; padding: 12px; border-radius: 12px; margin-bottom: 12px; }
 .filter-title { font-size: 14px; font-weight: 600; color: #475569; display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
-.filter-inputs { display: flex; gap: 8px; }
-.filter-inputs select { flex: 1; padding: 8px; border-radius: 6px; border: 1px solid #cbd5e1; font-size: 14px; background: white; }
+.filter-inputs { display: flex; gap: 8px; flex-wrap: wrap; }
+.filter-inputs select { flex: 1; min-width: 120px; padding: 8px; border-radius: 6px; border: 1px solid #cbd5e1; font-size: 14px; background: white; }
 
 .checklist { display: flex; flex-direction: column; gap: 16px; flex: 1; }
 .empty-state { text-align: center; color: #94a3b8; padding: 40px 0; font-weight: 500;}
@@ -129,13 +129,13 @@ button { border: none; background: transparent; cursor: pointer; font-family: in
 .check-btn.checked-partner { color: #d97706; }
 .check-btn.checked-manager { color: #059669; }
 
-/* Floating Action Button */
-.fab-btn { position: fixed; bottom: 80px; right: 24px; width: 56px; height: 56px; background: #4f46e5; color: white; border-radius: 50%; display: flex; align-items: center; justify-content: center; box-shadow: 0 4px 12px rgba(79, 70, 229, 0.4); z-index: 20; transition: 0.2s; }
-.fab-btn:active { transform: scale(0.95); }
+/* Floating Action Button - Ajustado para pílula amarela ao centro */
+.fab-btn { position: fixed; bottom: 90px; left: 50%; transform: translateX(-50%); width: auto; padding: 0 24px; height: 48px; background: #eab308; color: #0f172a; border-radius: 24px; display: flex; align-items: center; justify-content: center; gap: 8px; box-shadow: 0 4px 12px rgba(234, 179, 8, 0.4); z-index: 20; transition: 0.2s; font-weight: bold; font-size: 15px; white-space: nowrap; }
+.fab-btn:active { transform: translate(-50%, 2px); }
 
 /* Bottom Navigation */
-.bottom-nav { position: fixed; bottom: 0; left: 0; width: 100%; background: white; border-top: 1px solid #e2e8f0; display: flex; justify-content: space-around; padding: 12px 0 20px 0; z-index: 20; box-shadow: 0 -4px 6px -1px rgba(0,0,0,0.05); }
-.bottom-nav button { display: flex; flex-direction: column; align-items: center; gap: 4px; color: #94a3b8; width: 80px; transition: 0.2s; }
+.bottom-nav { position: fixed; bottom: 0; left: 0; width: 100%; background: white; border-top: 1px solid #e2e8f0; display: flex; justify-content: space-around; padding: 12px 0 20px 0; z-index: 20; box-shadow: 0 -4px 10px rgba(0,0,0,0.05); }
+.bottom-nav button { display: flex; flex-direction: column; align-items: center; gap: 4px; color: #94a3b8; width: 100%; transition: 0.2s; }
 .bottom-nav button span { font-size: 10px; font-weight: bold; text-transform: uppercase; letter-spacing: 0.5px; }
 .bottom-nav button.active { color: #4f46e5; }
 

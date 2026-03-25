@@ -1,13 +1,13 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { initializeApp } from 'firebase/app';
-import { getAuth, signInWithEmailAndPassword, signOut, onAuthStateChanged } from 'firebase/auth';
+import { getAuth, signInWithEmailAndPassword, signOut, onAuthStateChanged, signInWithCustomToken, signInAnonymously } from 'firebase/auth';
 import { getFirestore, collection, onSnapshot, addDoc, updateDoc, deleteDoc, doc } from 'firebase/firestore';
 import { 
   Camera, CheckCircle, Circle, Trash2, 
   FileText, ArrowLeft, BarChart3, Filter, Printer, Building2, LogOut, Settings,
   Pencil, ArrowUpRight, Circle as CircleIcon, Undo, Check, X
 } from 'lucide-react';
-import './App.css';
+import './App.css'; // Importação do arquivo de estilos
 
 // --- 1. CONFIGURAÇÃO DO FIREBASE ---
 const firebaseConfig = {
@@ -23,12 +23,11 @@ const app = initializeApp(firebaseConfig);
 const auth = getAuth(app);
 const db = getFirestore(app);
 
-// Caminhos do Banco de Dados
+// Caminhos das coleções de dados no Firebase para Produção
 const collectionPath = 'checklists';
 const partnersPath = 'partners';
 
 // --- 2. DEFINIÇÃO DE PERFIS ---
-// E-mails que terão perfil de GERENTE (Acesso a Config e OK Final)
 const EMAILS_GERENCIA = [
   'seu.email@hotel.com',
   'gerente@hotel.com',
@@ -58,8 +57,6 @@ const STAGES = {
 };
 
 const DISCIPLINES = ['Civil', 'Pintura', 'Hidráulica', 'Elétrica', 'Manutenção', 'Limpeza', 'Marcenaria', 'Marmoraria', 'EC'];
-
-// CORES DO EDITOR DE IMAGEM
 const EDITOR_COLORS = ['#ef4444', '#eab308', '#3b82f6', '#000000', '#ffffff']; 
 
 // --- 4. COMPONENTE PRINCIPAL ---
@@ -75,11 +72,12 @@ export default function App() {
   const [selectedStage, setSelectedStage] = useState(null);
   const [selectedLocation, setSelectedLocation] = useState(null);
   
-  // Estado de Dados Firebase
   const [items, setItems] = useState([]);
   const [partners, setPartners] = useState([]);
   
-  // Estados do formulário (Novo Item)
+  // Estados do formulário de Novo/Edição de Item
+  const [editingItem, setEditingItem] = useState(null);
+  const [returnToGlobal, setReturnToGlobal] = useState(false);
   const [photo, setPhoto] = useState(null);
   const [originalPhoto, setOriginalPhoto] = useState(null);
   const [description, setDescription] = useState('');
@@ -94,7 +92,7 @@ export default function App() {
   const isDrawingRef = useRef(false);
   const startPosRef = useRef({ x: 0, y: 0 });
 
-  // Estados do formulário (Config / Parceiros)
+  // Configuração
   const [partnerEmail, setPartnerEmail] = useState('');
   const [partnerProject, setPartnerProject] = useState('');
 
@@ -105,10 +103,9 @@ export default function App() {
   const [locationFilter, setLocationFilter] = useState('all');
   const [sortBy, setSortBy] = useState('date');
 
-  // Fullscreen Photo Modal View
   const [fullScreenImage, setFullScreenImage] = useState(null);
 
-  // Monitora Autenticação e Carrega Dados do Firebase
+  // Monitora Autenticação e Carrega Dados
   useEffect(() => {
     let unsubscribeSnap = null;
     let unsubscribePartners = null;
@@ -151,15 +148,11 @@ export default function App() {
     };
   }, []);
 
-  // --- FUNÇÕES DE AÇÃO NA BASE DE DADOS ---
-
+  // --- FUNÇÕES DE AÇÃO ---
   const handleLogin = async (e) => {
     e.preventDefault();
-    try {
-      await signInWithEmailAndPassword(auth, loginEmail, loginPassword);
-    } catch (error) {
-      alert("Erro ao entrar. Verifique se o e-mail e a senha estão corretos.");
-    }
+    try { await signInWithEmailAndPassword(auth, loginEmail, loginPassword); } 
+    catch (error) { alert("Erro ao entrar. Verifique credenciais."); }
   };
 
   const handlePhotoUpload = (e) => {
@@ -167,28 +160,18 @@ export default function App() {
     if (file) {
       const reader = new FileReader();
       reader.onloadend = () => {
-        // Redimensiona levemente para evitar travamento no canvas/firebase
         const img = new Image();
         img.onload = () => {
           const canvas = document.createElement('canvas');
-          const MAX_WIDTH = 1200;
-          const MAX_HEIGHT = 1200;
-          let width = img.width;
-          let height = img.height;
-
-          if (width > height) {
-            if (width > MAX_WIDTH) { height *= MAX_WIDTH / width; width = MAX_WIDTH; }
-          } else {
-            if (height > MAX_HEIGHT) { width *= MAX_HEIGHT / height; height = MAX_HEIGHT; }
-          }
-          canvas.width = width;
-          canvas.height = height;
+          const MAX_WIDTH = 1200; const MAX_HEIGHT = 1200;
+          let width = img.width; let height = img.height;
+          if (width > height) { if (width > MAX_WIDTH) { height *= MAX_WIDTH / width; width = MAX_WIDTH; } } 
+          else { if (height > MAX_HEIGHT) { width *= MAX_HEIGHT / height; height = MAX_HEIGHT; } }
+          canvas.width = width; canvas.height = height;
           const ctx = canvas.getContext('2d');
           ctx.drawImage(img, 0, 0, width, height);
           const resizedBase64 = canvas.toDataURL('image/jpeg', 0.8);
-          
-          setPhoto(resizedBase64);
-          setOriginalPhoto(resizedBase64);
+          setPhoto(resizedBase64); setOriginalPhoto(resizedBase64);
         };
         img.src = reader.result;
       };
@@ -196,34 +179,46 @@ export default function App() {
     }
   };
 
-  const addItem = async () => {
+  const saveItem = async () => {
     if (!photo || !description || !discipline) return;
     try {
-      await addDoc(collection(db, collectionPath), { 
-        projectId: selectedProject.id,
-        stageId: selectedStage.id,
-        locationId: selectedLocation,
-        photoUrl: photo,
-        description,
-        discipline,
-        partnerFixed: false,
-        managerApproved: false,
-        createdAt: new Date().toISOString(),
-        authorEmail: user?.email || 'usuario' 
-      });
-      setView('list');
-      setPhoto(null);
-      setOriginalPhoto(null);
-      setDescription('');
-      setDiscipline('');
-    } catch (e) { console.error("Erro ao adicionar:", e); }
+      if (editingItem) {
+        await updateDoc(doc(db, collectionPath, editingItem.id), { photoUrl: photo, description, discipline });
+      } else {
+        await addDoc(collection(db, collectionPath), { 
+          projectId: selectedProject.id, stageId: selectedStage.id, locationId: selectedLocation,
+          photoUrl: photo, description, discipline, partnerFixed: false, managerApproved: false,
+          createdAt: new Date().toISOString(), authorEmail: user?.email || 'usuario' 
+        });
+      }
+      
+      if (returnToGlobal) { setView('list'); setSelectedProject(null); setSelectedStage(null); setSelectedLocation(null); } 
+      else { setView('list'); }
+      
+      setPhoto(null); setOriginalPhoto(null); setDescription(''); setDiscipline(''); setEditingItem(null);
+    } catch (e) { console.error("Erro ao salvar:", e); }
+  };
+
+  const handleEditItem = (item) => {
+    setEditingItem(item);
+    setPhoto(item.photoUrl);
+    setOriginalPhoto(item.photoUrl);
+    setDescription(item.description);
+    setDiscipline(item.discipline);
+    
+    // Configura os contextos de obra de onde esse item veio para preencher o form corretamente
+    setReturnToGlobal(selectedLocation === null);
+    setSelectedProject(INITIAL_PROJECTS.find(p => p.id === item.projectId));
+    setSelectedStage(STAGES[item.projectId]?.find(s => s.id === item.stageId));
+    setSelectedLocation(item.locationId);
+    
+    setView('form');
   };
 
   const toggleStatus = async (item, field) => {
     if (field === 'managerApproved' && role !== 'manager') return;
-    try {
-      await updateDoc(doc(db, collectionPath, item.id), { [field]: !item[field] });
-    } catch (e) { console.error("Erro ao atualizar:", e); }
+    try { await updateDoc(doc(db, collectionPath, item.id), { [field]: !item[field] }); } 
+    catch (e) { console.error("Erro ao atualizar:", e); }
   };
 
   const deleteItem = async (id) => {
@@ -236,35 +231,23 @@ export default function App() {
 
   const handleAddPartner = async () => {
     if(!partnerEmail || !partnerProject) return;
-    try {
-      await addDoc(collection(db, partnersPath), { 
-        email: partnerEmail.toLowerCase(), 
-        projectId: partnerProject 
-      });
-      setPartnerEmail('');
-      setPartnerProject('');
-    } catch (e) { console.error("Erro ao vincular parceiro:", e); }
+    try { await addDoc(collection(db, partnersPath), { email: partnerEmail.toLowerCase(), projectId: partnerProject }); setPartnerEmail(''); setPartnerProject(''); } 
+    catch (e) { console.error("Erro ao vincular parceiro:", e); }
   };
 
   const handleDeletePartner = async (id) => {
     if(window.confirm("Remover acesso deste parceiro?")) {
-      try { await deleteDoc(doc(db, partnersPath, id)); } 
-      catch (e) { console.error("Erro ao remover parceiro:", e); }
+      try { await deleteDoc(doc(db, partnersPath, id)); } catch (e) { console.error("Erro:", e); }
     }
   };
 
-  // --- LÓGICA DO EDITOR DE FOTOS (CANVAS) ---
-
+  // --- EDITOR DE IMAGEM ---
   useEffect(() => {
     if (isEditingPhoto && canvasRef.current && photo) {
       const canvas = canvasRef.current;
       const ctx = canvas.getContext('2d');
       const img = new Image();
-      img.onload = () => {
-        canvas.width = img.width;
-        canvas.height = img.height;
-        ctx.drawImage(img, 0, 0);
-      };
+      img.onload = () => { canvas.width = img.width; canvas.height = img.height; ctx.drawImage(img, 0, 0); };
       img.src = photo;
     }
   }, [isEditingPhoto, photo]); 
@@ -273,103 +256,59 @@ export default function App() {
     const canvas = canvasRef.current;
     if (!canvas) return { x: 0, y: 0 };
     const rect = canvas.getBoundingClientRect();
-    
     const clientX = e.touches ? e.touches[0].clientX : e.clientX;
     const clientY = e.touches ? e.touches[0].clientY : e.clientY;
-
-    const scaleX = canvas.width / rect.width;
-    const scaleY = canvas.height / rect.height;
-
-    return {
-      x: (clientX - rect.left) * scaleX,
-      y: (clientY - rect.top) * scaleY
-    };
+    return { x: (clientX - rect.left) * (canvas.width / rect.width), y: (clientY - rect.top) * (canvas.height / rect.height) };
   };
 
   const startDrawing = (e) => {
     if (!canvasRef.current) return;
     if(e.cancelable) e.preventDefault(); 
-    
     const { x, y } = getCanvasCoordinates(e);
-    startPosRef.current = { x, y };
-    isDrawingRef.current = true;
-
-    const canvas = canvasRef.current;
-    const ctx = canvas.getContext('2d');
-    
+    startPosRef.current = { x, y }; isDrawingRef.current = true;
+    const canvas = canvasRef.current; const ctx = canvas.getContext('2d');
     snapshotRef.current = ctx.getImageData(0, 0, canvas.width, canvas.height);
-
-    ctx.beginPath();
-    ctx.moveTo(x, y);
-    ctx.strokeStyle = drawColor;
-    ctx.lineWidth = canvas.width * 0.008; 
-    ctx.lineCap = 'round';
-    ctx.lineJoin = 'round';
+    ctx.beginPath(); ctx.moveTo(x, y); ctx.strokeStyle = drawColor; ctx.lineWidth = canvas.width * 0.008; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
   };
 
   const draw = (e) => {
     if (!isDrawingRef.current || !canvasRef.current) return;
     if(e.cancelable) e.preventDefault();
-
     const { x, y } = getCanvasCoordinates(e);
-    const canvas = canvasRef.current;
-    const ctx = canvas.getContext('2d');
+    const canvas = canvasRef.current; const ctx = canvas.getContext('2d');
 
-    if (drawTool === 'pencil') {
-      ctx.lineTo(x, y);
-      ctx.stroke();
-    } else if (drawTool === 'arrow' || drawTool === 'circle') {
+    if (drawTool === 'pencil') { ctx.lineTo(x, y); ctx.stroke(); } 
+    else if (drawTool === 'arrow' || drawTool === 'circle') {
       ctx.putImageData(snapshotRef.current, 0, 0);
-      
       const { x: startX, y: startY } = startPosRef.current;
-      ctx.beginPath();
-      ctx.strokeStyle = drawColor;
-      ctx.lineWidth = canvas.width * 0.008;
+      ctx.beginPath(); ctx.strokeStyle = drawColor; ctx.lineWidth = canvas.width * 0.008;
 
       if (drawTool === 'circle') {
         const radius = Math.sqrt(Math.pow(x - startX, 2) + Math.pow(y - startY, 2));
-        ctx.arc(startX, startY, radius, 0, 2 * Math.PI);
-        ctx.stroke();
+        ctx.arc(startX, startY, radius, 0, 2 * Math.PI); ctx.stroke();
       } else if (drawTool === 'arrow') {
-        const headlen = canvas.width * 0.03; 
-        const dx = x - startX;
-        const dy = y - startY;
-        const angle = Math.atan2(dy, dx);
-        
-        ctx.moveTo(startX, startY);
-        ctx.lineTo(x, y);
+        const headlen = canvas.width * 0.03; const angle = Math.atan2(y - startY, x - startX);
+        ctx.moveTo(startX, startY); ctx.lineTo(x, y);
         ctx.lineTo(x - headlen * Math.cos(angle - Math.PI / 6), y - headlen * Math.sin(angle - Math.PI / 6));
-        ctx.moveTo(x, y);
-        ctx.lineTo(x - headlen * Math.cos(angle + Math.PI / 6), y - headlen * Math.sin(angle + Math.PI / 6));
+        ctx.moveTo(x, y); ctx.lineTo(x - headlen * Math.cos(angle + Math.PI / 6), y - headlen * Math.sin(angle + Math.PI / 6));
         ctx.stroke();
       }
     }
   };
 
-  const stopDrawing = () => {
-    isDrawingRef.current = false;
-  };
+  const stopDrawing = () => { isDrawingRef.current = false; };
 
   const clearCanvas = () => {
     if (!canvasRef.current || !originalPhoto) return;
-    const canvas = canvasRef.current;
-    const ctx = canvas.getContext('2d');
+    const canvas = canvasRef.current; const ctx = canvas.getContext('2d');
     const img = new Image();
-    img.onload = () => {
-      ctx.clearRect(0, 0, canvas.width, canvas.height);
-      ctx.drawImage(img, 0, 0);
-    };
+    img.onload = () => { ctx.clearRect(0, 0, canvas.width, canvas.height); ctx.drawImage(img, 0, 0); };
     img.src = originalPhoto;
   };
 
   const saveEditedPhoto = () => {
-    if (canvasRef.current) {
-      const dataUrl = canvasRef.current.toDataURL('image/jpeg', 0.8);
-      setPhoto(dataUrl);
-      setIsEditingPhoto(false);
-    }
+    if (canvasRef.current) { setPhoto(canvasRef.current.toDataURL('image/jpeg', 0.8)); setIsEditingPhoto(false); }
   };
-
 
   // --- TELA DE LOGIN ---
   if (loadingAuth) return <div className="loading-screen">Carregando VistoriaPRO...</div>;
@@ -381,24 +320,9 @@ export default function App() {
           <Building2 size={48} className="login-icon" />
           <h1 className="login-title">Vistoria<span>PRO</span></h1>
           <p className="login-subtitle">Gestão de Checklists de Obras</p>
-          
           <form className="login-form" onSubmit={handleLogin}>
-            <input 
-              type="email" 
-              placeholder="E-mail" 
-              className="login-input"
-              value={loginEmail}
-              onChange={(e) => setLoginEmail(e.target.value)}
-              required
-            />
-            <input 
-              type="password" 
-              placeholder="Senha" 
-              className="login-input"
-              value={loginPassword}
-              onChange={(e) => setLoginPassword(e.target.value)}
-              required
-            />
+            <input type="email" placeholder="E-mail" className="login-input" value={loginEmail} onChange={(e) => setLoginEmail(e.target.value)} required />
+            <input type="password" placeholder="Senha" className="login-input" value={loginPassword} onChange={(e) => setLoginPassword(e.target.value)} required />
             <button type="submit" className="btn-primary">Entrar no Sistema</button>
           </form>
         </div>
@@ -407,72 +331,49 @@ export default function App() {
   }
 
   // --- RENDERS DAS PÁGINAS ---
-
   const renderDashboard = () => {
-    const dashboardItems = dashboardProject === 'all' 
-      ? items 
-      : items.filter(i => i.projectId === dashboardProject);
+    // Parceiros só enxergam dados das obras deles
+    let dashboardSource = items;
+    if (role === 'partner') {
+       const myProjectIds = partners.filter(p => p.email === user.email).map(p => p.projectId);
+       dashboardSource = items.filter(i => myProjectIds.includes(i.projectId));
+    }
 
+    const dashboardItems = dashboardProject === 'all' ? dashboardSource : dashboardSource.filter(i => i.projectId === dashboardProject);
     const total = dashboardItems.length;
     const completed = dashboardItems.filter(i => i.managerApproved).length;
     const pending = total - completed;
     const partnerFixed = dashboardItems.filter(i => i.partnerFixed && !i.managerApproved).length;
     const progress = total === 0 ? 0 : Math.round((completed / total) * 100);
 
-    const discCount = dashboardItems.reduce((acc, curr) => {
-      acc[curr.discipline] = (acc[curr.discipline] || 0) + 1;
-      return acc;
-    }, {});
-    
+    const discCount = dashboardItems.reduce((acc, curr) => { acc[curr.discipline] = (acc[curr.discipline] || 0) + 1; return acc; }, {});
     const topDisciplines = Object.entries(discCount).sort((a, b) => b[1] - a[1]).slice(0, 4);
+
+    const availableProjects = role === 'manager' 
+      ? INITIAL_PROJECTS 
+      : INITIAL_PROJECTS.filter(p => partners.some(partner => partner.email === user.email && partner.projectId === p.id));
 
     return (
       <div className="page-container fade-in">
         <h2 className="section-title mb-0">Resumo Geral</h2>
-        
-        <select 
-          className="form-input" 
-          value={dashboardProject} 
-          onChange={(e) => setDashboardProject(e.target.value)}
-        >
-          <option value="all">Todas as Obras</option>
-          {INITIAL_PROJECTS.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
+        <select className="form-input" value={dashboardProject} onChange={(e) => setDashboardProject(e.target.value)}>
+          <option value="all">Todas as Obras Permitidas</option>
+          {availableProjects.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
         </select>
-        
         <div className="stats-grid">
-          <div className="stat-card">
-            <span className="stat-value">{total}</span>
-            <span className="stat-label">Total de Itens</span>
-          </div>
-          <div className="stat-card">
-            <span className="stat-value text-green">{progress}%</span>
-            <span className="stat-label">Concluído</span>
-          </div>
-          <div className="stat-card">
-            <span className="stat-value text-orange">{partnerFixed}</span>
-            <span className="stat-label">Aguardando Avaliação</span>
-          </div>
-          <div className="stat-card">
-            <span className="stat-value text-red">{pending - partnerFixed}</span>
-            <span className="stat-label">Pendentes</span>
-          </div>
+          <div className="stat-card"><span className="stat-value">{total}</span><span className="stat-label">Total de Itens</span></div>
+          <div className="stat-card"><span className="stat-value text-green">{progress}%</span><span className="stat-label">Concluído</span></div>
+          <div className="stat-card"><span className="stat-value text-orange">{partnerFixed}</span><span className="stat-label">Aguardando Avaliação</span></div>
+          <div className="stat-card"><span className="stat-value text-red">{pending - partnerFixed}</span><span className="stat-label">Pendentes</span></div>
         </div>
-
         <div className="chart-card">
           <h3 className="chart-title"><BarChart3 size={20} /> Disciplinas Mais Recorrentes</h3>
-          {topDisciplines.length === 0 ? (
-            <p className="text-muted">Nenhum dado registado nesta obra.</p>
-          ) : (
+          {topDisciplines.length === 0 ? (<p className="text-muted">Nenhum dado registado ainda.</p>) : (
             <div className="chart-list">
               {topDisciplines.map(([disc, count], idx) => (
                 <div key={idx} className="chart-row">
-                  <div className="chart-row-header">
-                    <span>{disc}</span>
-                    <span className="text-muted">{count} itens ({Math.round((count/total)*100)}%)</span>
-                  </div>
-                  <div className="progress-bar-bg">
-                    <div className="progress-bar-fill" style={{ width: `${(count/total)*100}%` }}></div>
-                  </div>
+                  <div className="chart-row-header"><span>{disc}</span><span className="text-muted">{count} itens ({Math.round((count/total)*100)}%)</span></div>
+                  <div className="progress-bar-bg"><div className="progress-bar-fill" style={{ width: `${(count/total)*100}%` }}></div></div>
                 </div>
               ))}
             </div>
@@ -483,25 +384,17 @@ export default function App() {
   };
 
   const renderProjects = () => {
-    const myProjects = role === 'manager' 
-      ? INITIAL_PROJECTS 
-      : INITIAL_PROJECTS.filter(p => partners.some(partner => partner.email === user.email && partner.projectId === p.id));
-
     return (
       <div className="page-container fade-in">
         <h2 className="section-title">Selecione a Obra</h2>
-        {myProjects.length === 0 ? (
-          <p className="text-muted center mt-2">Você não possui acesso a nenhuma obra no momento.</p>
-        ) : (
-          <div className="list-group">
-            {myProjects.map(proj => (
-              <button key={proj.id} onClick={() => { setSelectedProject(proj); setView('stages'); }} className="list-item">
-                <Building2 size={24} className="icon-blue" />
-                <span className="list-text">{proj.name}</span>
-              </button>
-            ))}
-          </div>
-        )}
+        <div className="list-group">
+          {INITIAL_PROJECTS.map(proj => (
+            <button key={proj.id} onClick={() => { setSelectedProject(proj); setView('stages'); }} className="list-item">
+              <Building2 size={24} className="icon-blue" />
+              <span className="list-text">{proj.name}</span>
+            </button>
+          ))}
+        </div>
       </div>
     );
   };
@@ -513,9 +406,7 @@ export default function App() {
         <h2 className="section-title center">Etapas de {selectedProject?.name}</h2>
         <div className="list-group">
           {stages.map(stage => (
-            <button key={stage.id} onClick={() => { setSelectedStage(stage); setView('locations'); }} className="list-item">
-              <span className="list-text">{stage.name}</span>
-            </button>
+            <button key={stage.id} onClick={() => { setSelectedStage(stage); setView('locations'); }} className="list-item"><span className="list-text">{stage.name}</span></button>
           ))}
         </div>
       </div>
@@ -531,11 +422,9 @@ export default function App() {
           {locations.map((loc, idx) => {
             const locItems = items.filter(i => i.projectId === selectedProject.id && i.stageId === selectedStage.id && i.locationId === loc);
             const pending = locItems.filter(i => !i.managerApproved).length;
-
             return (
               <button key={idx} onClick={() => { setSelectedLocation(loc); setView('list'); }} className="location-card">
-                <span className="location-name">{loc}</span>
-                {pending > 0 && <span className="badge-alert">{pending}</span>}
+                <span className="location-name">{loc}</span>{pending > 0 && <span className="badge-alert">{pending}</span>}
               </button>
             )
           })}
@@ -547,31 +436,20 @@ export default function App() {
   const renderForm = () => {
     return (
       <div className="page-container fade-in">
-        <h2 className="section-title">Nova Não Conformidade</h2>
+        <h2 className="section-title">{editingItem ? 'Editar Não Conformidade' : 'Nova Não Conformidade'}</h2>
         <p className="breadcrumb">{selectedProject?.name} &gt; {selectedLocation}</p>
 
         <div style={{display: 'flex', flexDirection: 'column', gap: '8px', marginBottom: '8px'}}>
           <div className="photo-upload-area" style={{marginBottom: 0}}>
-            {photo ? (
-                <img src={photo} alt="Preview" className="photo-preview" />
-            ) : (
-              <div className="photo-placeholder">
-                <Camera size={48} />
-                <span>Toque para capturar imagem</span>
-              </div>
-            )}
+            {photo ? (<img src={photo} alt="Preview" className="photo-preview" />) : (<div className="photo-placeholder"><Camera size={48} /><span>Toque para capturar imagem</span></div>)}
             {!photo && <input type="file" accept="image/*" capture="environment" onChange={handlePhotoUpload} className="photo-input" />}
           </div>
           
           {photo && (
             <div style={{display: 'flex', gap: '8px'}}>
-              <button onClick={() => setIsEditingPhoto(true)} className="btn-outline" style={{flex: 1}}>
-                <Pencil size={18}/> Marcar Foto
-              </button>
+              <button onClick={() => setIsEditingPhoto(true)} className="btn-outline" style={{flex: 1}}><Pencil size={18}/> Marcar Foto</button>
               <div style={{position: 'relative', width: '44px'}}>
-                 <button className="btn-outline" style={{width: '100%', padding: '0', height: '100%', borderColor: '#ef4444', color: '#ef4444'}}>
-                   <Trash2 size={18}/>
-                 </button>
+                 <button className="btn-outline" style={{width: '100%', padding: '0', height: '100%', borderColor: '#ef4444', color: '#ef4444'}}><Trash2 size={18}/></button>
                  <input type="file" accept="image/*" capture="environment" onChange={handlePhotoUpload} className="photo-input" />
               </div>
             </div>
@@ -582,16 +460,13 @@ export default function App() {
           <label style={{display: 'block', fontSize: '14px', fontWeight: 'bold', color: '#334155', marginBottom: '6px'}}>Descrição do Problema</label>
           <textarea className="form-input" value={description} onChange={e => setDescription(e.target.value)} rows="3" placeholder="Descreva a não conformidade..."></textarea>
         </div>
-
         <div className="form-group" style={{marginBottom: '20px'}}>
           <label style={{display: 'block', fontSize: '14px', fontWeight: 'bold', color: '#334155', marginBottom: '6px'}}>Disciplina</label>
           <select className="form-input" value={discipline} onChange={e => setDiscipline(e.target.value)}>
-            <option value="">Selecione...</option>
-            {DISCIPLINES.map(d => <option key={d} value={d}>{d}</option>)}
+            <option value="">Selecione...</option>{DISCIPLINES.map(d => <option key={d} value={d}>{d}</option>)}
           </select>
         </div>
-
-        <button onClick={addItem} className="btn-primary">Salvar Registro</button>
+        <button onClick={saveItem} className="btn-primary">Salvar Registro</button>
       </div>
     );
   };
@@ -600,56 +475,23 @@ export default function App() {
     return (
       <div className="editor-overlay fade-in">
         <div className="editor-header">
-           <button onClick={() => setIsEditingPhoto(false)} className="editor-header-btn">
-             <X size={20}/> Voltar
-           </button>
+           <button onClick={() => setIsEditingPhoto(false)} className="editor-header-btn"><X size={20}/> Voltar</button>
            <span style={{fontWeight: 'bold', fontSize: '16px'}}>Marcar Imagem</span>
-           <button onClick={saveEditedPhoto} className="editor-header-btn save">
-             <Check size={20}/> Pronto
-           </button>
+           <button onClick={saveEditedPhoto} className="editor-header-btn save"><Check size={20}/> Pronto</button>
         </div>
-        
         <div className="editor-canvas-container">
-           <canvas 
-             ref={canvasRef}
-             className="editor-canvas"
-             onMouseDown={startDrawing}
-             onMouseMove={draw}
-             onMouseUp={stopDrawing}
-             onMouseOut={stopDrawing}
-             onTouchStart={startDrawing}
-             onTouchMove={draw}
-             onTouchEnd={stopDrawing}
-             onTouchCancel={stopDrawing}
-           />
+           <canvas ref={canvasRef} className="editor-canvas" onMouseDown={startDrawing} onMouseMove={draw} onMouseUp={stopDrawing} onMouseOut={stopDrawing} onTouchStart={startDrawing} onTouchMove={draw} onTouchEnd={stopDrawing} onTouchCancel={stopDrawing} />
         </div>
-
         <div className="editor-toolbar">
            <div className="editor-tools">
-             <button className={`editor-tool-btn ${drawTool === 'pencil' ? 'active' : ''}`} onClick={() => setDrawTool('pencil')}>
-               <Pencil size={24}/> Lápis
-             </button>
-             <button className={`editor-tool-btn ${drawTool === 'arrow' ? 'active' : ''}`} onClick={() => setDrawTool('arrow')}>
-               <ArrowUpRight size={24}/> Seta
-             </button>
-             <button className={`editor-tool-btn ${drawTool === 'circle' ? 'active' : ''}`} onClick={() => setDrawTool('circle')}>
-               <CircleIcon size={24}/> Círculo
-             </button>
+             <button className={`editor-tool-btn ${drawTool === 'pencil' ? 'active' : ''}`} onClick={() => setDrawTool('pencil')}><Pencil size={24}/> Lápis</button>
+             <button className={`editor-tool-btn ${drawTool === 'arrow' ? 'active' : ''}`} onClick={() => setDrawTool('arrow')}><ArrowUpRight size={24}/> Seta</button>
+             <button className={`editor-tool-btn ${drawTool === 'circle' ? 'active' : ''}`} onClick={() => setDrawTool('circle')}><CircleIcon size={24}/> Círculo</button>
              <div style={{width: '1px', background: '#334155', margin: '0 4px'}}></div>
-             <button className="editor-tool-btn" onClick={clearCanvas}>
-               <Undo size={24}/> Desfazer
-             </button>
+             <button className="editor-tool-btn" onClick={clearCanvas}><Undo size={24}/> Desfazer</button>
            </div>
-           
            <div className="editor-colors">
-             {EDITOR_COLORS.map(color => (
-               <button 
-                 key={color} 
-                 className={`editor-color-btn ${drawColor === color ? 'active' : ''}`} 
-                 style={{backgroundColor: color}}
-                 onClick={() => setDrawColor(color)}
-               />
-             ))}
+             {EDITOR_COLORS.map(color => (<button key={color} className={`editor-color-btn ${drawColor === color ? 'active' : ''}`} style={{backgroundColor: color}} onClick={() => setDrawColor(color)} />))}
            </div>
         </div>
       </div>
@@ -658,10 +500,18 @@ export default function App() {
 
   const renderList = () => {
     let filteredItems = items;
-    if (selectedLocation) {
-      filteredItems = items.filter(i => i.projectId === selectedProject?.id && i.stageId === selectedStage?.id && i.locationId === selectedLocation);
+    const isObrasTab = selectedLocation != null;
+
+    // Limita visão dos parceiros apenas às obras permitidas
+    if (role === 'partner') {
+       const myProjectIds = partners.filter(p => p.email === user.email).map(p => p.projectId);
+       filteredItems = filteredItems.filter(i => myProjectIds.includes(i.projectId));
+    }
+
+    if (isObrasTab) {
+      filteredItems = filteredItems.filter(i => i.projectId === selectedProject?.id && i.stageId === selectedStage?.id && i.locationId === selectedLocation);
     } else if (selectedProject) {
-      filteredItems = items.filter(i => i.projectId === selectedProject.id);
+      filteredItems = filteredItems.filter(i => i.projectId === selectedProject.id);
     }
 
     const availableLocations = Array.from(new Set(filteredItems.map(i => i.locationId))).filter(Boolean).sort();
@@ -680,14 +530,18 @@ export default function App() {
     return (
       <div className="page-container fade-in">
         <div className="hide-print" style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px'}}>
-          <h2 className="section-title mb-0">{selectedLocation ? `Itens - ${selectedLocation}` : 'Checklists'}</h2>
-          <button onClick={() => window.print()} className="btn-secondary"><Printer size={16}/> PDF</button>
+          <h2 className="section-title mb-0">{isObrasTab ? `Itens - ${selectedLocation}` : 'Checklists'}</h2>
+          
+          {/* Somente exibe gerar PDF na aba de Checklists globais */}
+          {!isObrasTab && (
+            <button onClick={() => window.print()} className="btn-secondary"><Printer size={16}/> PDF</button>
+          )}
         </div>
 
         <div className="filter-panel hide-print">
           <div className="filter-title"><Filter size={16} /> Filtros Rápidos e Ordenação</div>
           <div className="filter-inputs" style={{ flexWrap: 'wrap' }}>
-            {!selectedLocation && (
+            {!isObrasTab && (
               <select value={locationFilter} onChange={(e) => setLocationFilter(e.target.value)}>
                 <option value="all">Todos os Locais</option>
                 {availableLocations.map(loc => <option key={loc} value={loc}>{loc}</option>)}
@@ -720,40 +574,58 @@ export default function App() {
                   {item.photoUrl ? <img src={item.photoUrl} alt="Vistoria" /> : <Camera color="#cbd5e1"/>}
                 </div>
                 <div className="item-content">
+                  
                   <div className="item-header">
                     <span className="tag-discipline">{item.discipline}</span>
-                    {role === 'manager' && !item.managerApproved && (
-                      <button onClick={() => deleteItem(item.id)} className="btn-delete hide-print"><Trash2 size={16} /></button>
+                    
+                    {/* Botões de Ação de Edição/Exclusão do Item - Apenas para Gerente */}
+                    {role === 'manager' && (
+                      <div style={{display: 'flex', gap: '12px'}}>
+                        <button onClick={() => handleEditItem(item)} className="btn-delete hide-print" style={{color: '#3b82f6'}} title="Editar item">
+                          <Pencil size={18} />
+                        </button>
+                        <button onClick={() => deleteItem(item.id)} className="btn-delete hide-print" title="Excluir item">
+                          <Trash2 size={18} />
+                        </button>
+                      </div>
                     )}
                   </div>
-                  <p className="item-desc">{item.description}</p>
-                  {!selectedLocation && <p className="item-loc">{item.locationId}</p>}
                   
-                  <div className="item-actions">
-                    <button 
-                      onClick={() => toggleStatus(item, 'partnerFixed')} disabled={item.managerApproved}
-                      className={`check-btn ${item.partnerFixed ? 'checked-partner' : ''}`}
-                    >
-                      {item.partnerFixed ? <CheckCircle size={18} className="hide-print"/> : <Circle size={18} className="hide-print"/>}
-                      <span className="hide-print">Parceiro Corrigiu</span>
-                    </button>
-                    <button 
-                      onClick={() => toggleStatus(item, 'managerApproved')} disabled={role === 'partner'}
-                      className={`check-btn ${item.managerApproved ? 'checked-manager' : ''} ${role === 'partner' ? 'disabled' : ''}`}
-                    >
-                      {item.managerApproved ? <CheckCircle size={18} className="hide-print"/> : <Circle size={18} className="hide-print"/>}
-                      <span className="hide-print">OK Final</span>
-                    </button>
-                  </div>
+                  <p className="item-desc">{item.description}</p>
+                  
+                  {/* Incluir o texto Local: antes do local se for a aba Checklists */}
+                  {!isObrasTab && <p className="item-loc"><strong>Local:</strong> {item.locationId}</p>}
+                  
+                  {/* Botões de OK Final / Corrigido SOMENTE na aba de Checklists */}
+                  {!isObrasTab && (
+                    <div className="item-actions">
+                      <button 
+                        onClick={() => toggleStatus(item, 'partnerFixed')} disabled={item.managerApproved}
+                        className={`check-btn ${item.partnerFixed ? 'checked-partner' : ''}`}
+                      >
+                        {item.partnerFixed ? <CheckCircle size={18} className="hide-print"/> : <Circle size={18} className="hide-print"/>}
+                        <span className="hide-print">Corrigido</span>
+                      </button>
+                      <button 
+                        onClick={() => toggleStatus(item, 'managerApproved')} disabled={role === 'partner'}
+                        className={`check-btn ${item.managerApproved ? 'checked-manager' : ''} ${role === 'partner' ? 'disabled' : ''}`}
+                      >
+                        {item.managerApproved ? <CheckCircle size={18} className="hide-print"/> : <Circle size={18} className="hide-print"/>}
+                        <span className="hide-print">OK Final</span>
+                      </button>
+                    </div>
+                  )}
+
                 </div>
               </div>
             ))
           )}
         </div>
 
-        {selectedLocation && (
-           <button onClick={() => setView('form')} className="fab-btn hide-print">
-             <Camera size={24} />
+        {/* FAB PARA CRIAR ITEM - Apenas Gerente e se estiver dentro de uma Obra (Local Específico) */}
+        {isObrasTab && role === 'manager' && (
+           <button onClick={() => { setEditingItem(null); setPhoto(null); setOriginalPhoto(null); setDescription(''); setDiscipline(''); setView('form'); }} className="fab-btn hide-print">
+             <Camera size={20} /> Nova Vistoria
            </button>
         )}
       </div>
@@ -766,20 +638,8 @@ export default function App() {
       
       <div className="settings-card">
         <h3 style={{fontSize: '15px', fontWeight: 'bold', color: '#1e293b', marginBottom: '12px'}}>Adicionar E-mail de Parceiro</h3>
-        <input 
-          type="email" 
-          placeholder="E-mail do fornecedor" 
-          className="form-input" 
-          style={{marginBottom: '10px'}}
-          value={partnerEmail}
-          onChange={e => setPartnerEmail(e.target.value)}
-        />
-        <select 
-          className="form-input" 
-          style={{marginBottom: '16px'}}
-          value={partnerProject}
-          onChange={e => setPartnerProject(e.target.value)}
-        >
+        <input type="email" placeholder="E-mail do fornecedor" className="form-input" style={{marginBottom: '10px'}} value={partnerEmail} onChange={e => setPartnerEmail(e.target.value)} />
+        <select className="form-input" style={{marginBottom: '16px'}} value={partnerProject} onChange={e => setPartnerProject(e.target.value)}>
           <option value="">Selecione a Obra para liberar acesso...</option>
           {INITIAL_PROJECTS.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
         </select>
@@ -803,7 +663,11 @@ export default function App() {
   );
 
   const handleBack = () => {
-    if (view === 'form') { setView('list'); setPhoto(null); setOriginalPhoto(null); }
+    if (view === 'form') { 
+      if (returnToGlobal) { setView('list'); setSelectedProject(null); setSelectedLocation(null); } 
+      else { setView('list'); }
+      setPhoto(null); setOriginalPhoto(null); setEditingItem(null);
+    }
     else if (view === 'list' && selectedLocation) { setSelectedLocation(null); setView('locations'); }
     else if (view === 'list' && !selectedLocation) setView('projects');
     else if (view === 'locations') { setSelectedStage(null); setView('stages'); }
@@ -812,10 +676,8 @@ export default function App() {
 
   return (
     <div className="app-layout">
-      {/* Editor de Imagem Fullscreen */}
       {isEditingPhoto && renderPhotoEditor()}
 
-      {/* Visualizador de Imagem Ampliada na Lista */}
       {fullScreenImage && (
         <div className="editor-overlay fade-in" style={{zIndex: 10000}} onClick={() => setFullScreenImage(null)}>
            <div className="editor-header">
@@ -861,13 +723,19 @@ export default function App() {
         <button onClick={() => { setView('dashboard'); setSelectedProject(null); setSelectedStage(null); setSelectedLocation(null); }} className={view === 'dashboard' ? 'active' : ''}>
           <BarChart3 size={24} /><span>Dashboard</span>
         </button>
-        <button onClick={() => { setView('projects'); setSelectedProject(null); setSelectedStage(null); setSelectedLocation(null); }} className={['projects','stages','locations'].includes(view) ? 'active' : ''}>
-          <Building2 size={24} /><span>Obras</span>
-        </button>
+        
+        {/* Menu OBRAS visível apenas para Gerentes */}
+        {role === 'manager' && (
+          <button onClick={() => { setView('projects'); setSelectedProject(null); setSelectedStage(null); setSelectedLocation(null); }} className={['projects','stages','locations'].includes(view) ? 'active' : ''}>
+            <Building2 size={24} /><span>Obras</span>
+          </button>
+        )}
+
         <button onClick={() => { setView('list'); setSelectedProject(null); setSelectedStage(null); setSelectedLocation(null); }} className={view === 'list' && !selectedLocation ? 'active' : ''}>
           <FileText size={24} /><span>Checklists</span>
         </button>
         
+        {/* Menu CONFIG visível apenas para Gerentes */}
         {role === 'manager' && (
           <button onClick={() => { setView('settings'); setSelectedProject(null); setSelectedStage(null); setSelectedLocation(null); }} className={view === 'settings' ? 'active' : ''}>
             <Settings size={24} /><span>Config</span>
