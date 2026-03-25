@@ -1,10 +1,11 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { initializeApp } from 'firebase/app';
 import { getAuth, signInWithEmailAndPassword, signOut, onAuthStateChanged } from 'firebase/auth';
 import { getFirestore, collection, onSnapshot, addDoc, updateDoc, deleteDoc, doc, setDoc } from 'firebase/firestore';
 import { 
   Camera, CheckCircle, Circle, Trash2, 
-  FileText, ArrowLeft, BarChart3, Filter, Printer, Building2, LogOut, Pencil, Settings, X
+  FileText, ArrowLeft, BarChart3, Filter, Printer, Building2, LogOut, Pencil, Settings, X,
+  ArrowUpRight, Circle as CircleIcon, Undo, Check
 } from 'lucide-react';
 import './App.css';
 
@@ -51,6 +52,7 @@ const STAGES = {
 };
 
 const DISCIPLINES = ['Civil', 'Pintura', 'Hidráulica', 'Elétrica', 'Manutenção', 'Limpeza', 'Marcenaria', 'Marmoraria', 'EC'];
+const EDITOR_COLORS = ['#ef4444', '#eab308', '#3b82f6', '#000000', '#ffffff']; 
 
 // --- 4. COMPONENTE PRINCIPAL ---
 export default function App() {
@@ -73,8 +75,18 @@ export default function App() {
   const [items, setItems] = useState([]);
   const [editingItemId, setEditingItemId] = useState(null);
   const [photo, setPhoto] = useState(null);
+  const [originalPhoto, setOriginalPhoto] = useState(null);
   const [description, setDescription] = useState('');
   const [discipline, setDiscipline] = useState('');
+
+  // Estados do Editor de Imagens (Canvas)
+  const [isEditingPhoto, setIsEditingPhoto] = useState(false);
+  const [drawTool, setDrawTool] = useState('pencil');
+  const [drawColor, setDrawColor] = useState(EDITOR_COLORS[0]);
+  const canvasRef = useRef(null);
+  const snapshotRef = useRef(null);
+  const isDrawingRef = useRef(false);
+  const startPosRef = useRef({ x: 0, y: 0 });
 
   const [statusFilter, setStatusFilter] = useState('all'); 
   const [disciplineFilter, setDisciplineFilter] = useState('all');
@@ -137,7 +149,7 @@ export default function App() {
 
   const visibleItems = items.filter(i => visibleProjects.some(p => p.id === i.projectId));
 
-  const handlePhotoUpload = (e, callback) => {
+  const handlePhotoUpload = (e) => {
     const file = e.target.files[0];
     if (!file) return;
     
@@ -146,7 +158,7 @@ export default function App() {
       const img = new Image();
       img.onload = () => {
         const canvas = document.createElement('canvas');
-        const MAX_WIDTH = 800; const MAX_HEIGHT = 800;
+        const MAX_WIDTH = 1200; const MAX_HEIGHT = 1200;
         let width = img.width; let height = img.height;
 
         if (width > height) { if (width > MAX_WIDTH) { height *= MAX_WIDTH / width; width = MAX_WIDTH; } } 
@@ -155,13 +167,88 @@ export default function App() {
         canvas.width = width; canvas.height = height;
         const ctx = canvas.getContext('2d');
         ctx.drawImage(img, 0, 0, width, height);
-        callback(canvas.toDataURL('image/jpeg', 0.7));
+        const resizedBase64 = canvas.toDataURL('image/jpeg', 0.8);
+        setPhoto(resizedBase64);
+        setOriginalPhoto(resizedBase64);
       };
       img.src = reader.result;
     };
     reader.readAsDataURL(file);
   };
 
+  // --- FUNÇÕES DO EDITOR DE IMAGEM ---
+  useEffect(() => {
+    if (isEditingPhoto && canvasRef.current && photo) {
+      const canvas = canvasRef.current;
+      const ctx = canvas.getContext('2d');
+      const img = new Image();
+      img.onload = () => { canvas.width = img.width; canvas.height = img.height; ctx.drawImage(img, 0, 0); };
+      img.src = photo;
+    }
+  }, [isEditingPhoto, photo]); 
+
+  const getCanvasCoordinates = (e) => {
+    const canvas = canvasRef.current;
+    if (!canvas) return { x: 0, y: 0 };
+    const rect = canvas.getBoundingClientRect();
+    const clientX = e.touches ? e.touches[0].clientX : e.clientX;
+    const clientY = e.touches ? e.touches[0].clientY : e.clientY;
+    return { x: (clientX - rect.left) * (canvas.width / rect.width), y: (clientY - rect.top) * (canvas.height / rect.height) };
+  };
+
+  const startDrawing = (e) => {
+    if (!canvasRef.current) return;
+    if(e.cancelable) e.preventDefault(); 
+    const { x, y } = getCanvasCoordinates(e);
+    startPosRef.current = { x, y }; isDrawingRef.current = true;
+    const canvas = canvasRef.current; const ctx = canvas.getContext('2d');
+    snapshotRef.current = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    ctx.beginPath(); ctx.moveTo(x, y); ctx.strokeStyle = drawColor; ctx.lineWidth = canvas.width * 0.008; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+  };
+
+  const draw = (e) => {
+    if (!isDrawingRef.current || !canvasRef.current) return;
+    if(e.cancelable) e.preventDefault();
+    const { x, y } = getCanvasCoordinates(e);
+    const canvas = canvasRef.current; const ctx = canvas.getContext('2d');
+
+    if (drawTool === 'pencil') { ctx.lineTo(x, y); ctx.stroke(); } 
+    else if (drawTool === 'arrow' || drawTool === 'circle') {
+      ctx.putImageData(snapshotRef.current, 0, 0);
+      const { x: startX, y: startY } = startPosRef.current;
+      ctx.beginPath(); ctx.strokeStyle = drawColor; ctx.lineWidth = canvas.width * 0.008;
+
+      if (drawTool === 'circle') {
+        const radius = Math.sqrt(Math.pow(x - startX, 2) + Math.pow(y - startY, 2));
+        ctx.arc(startX, startY, radius, 0, 2 * Math.PI); ctx.stroke();
+      } else if (drawTool === 'arrow') {
+        const headlen = canvas.width * 0.03; const angle = Math.atan2(y - startY, x - startX);
+        ctx.moveTo(startX, startY); ctx.lineTo(x, y);
+        ctx.lineTo(x - headlen * Math.cos(angle - Math.PI / 6), y - headlen * Math.sin(angle - Math.PI / 6));
+        ctx.moveTo(x, y); ctx.lineTo(x - headlen * Math.cos(angle + Math.PI / 6), y - headlen * Math.sin(angle + Math.PI / 6));
+        ctx.stroke();
+      }
+    }
+  };
+
+  const stopDrawing = () => { isDrawingRef.current = false; };
+
+  const clearCanvas = () => {
+    if (!canvasRef.current || !originalPhoto) return;
+    const canvas = canvasRef.current; const ctx = canvas.getContext('2d');
+    const img = new Image();
+    img.onload = () => { ctx.clearRect(0, 0, canvas.width, canvas.height); ctx.drawImage(img, 0, 0); };
+    img.src = originalPhoto;
+  };
+
+  const saveEditedPhoto = () => {
+    if (canvasRef.current) { 
+      setPhoto(canvasRef.current.toDataURL('image/jpeg', 0.8)); 
+      setIsEditingPhoto(false); 
+    }
+  };
+
+  // --- FUNÇÕES DE CRUD ---
   const saveItem = async () => {
     if (!photo || !description || !discipline) {
       alert("Preencha todos os campos e anexe uma foto.");
@@ -181,7 +268,7 @@ export default function App() {
         });
       }
       setView('list');
-      setPhoto(null); setDescription(''); setDiscipline(''); setEditingItemId(null);
+      setPhoto(null); setOriginalPhoto(null); setDescription(''); setDiscipline(''); setEditingItemId(null);
     } catch (e) {
       alert("Erro ao guardar item.");
     }
@@ -192,7 +279,10 @@ export default function App() {
     setSelectedProject(INITIAL_PROJECTS.find(p => p.id === item.projectId));
     setSelectedStage(STAGES[item.projectId]?.find(s => s.id === item.stageId));
     setSelectedLocation(item.locationId);
-    setPhoto(item.photoUrl); setDescription(item.description); setDiscipline(item.discipline);
+    setPhoto(item.photoUrl); 
+    setOriginalPhoto(item.photoUrl);
+    setDescription(item.description); 
+    setDiscipline(item.discipline);
     setEditingItemId(item.id);
     setView('form');
   };
@@ -391,14 +481,25 @@ export default function App() {
       <div className="page-container fade-in">
         <h2 className="section-title">{editingItemId ? 'Editar Vistoria' : 'Nova Não Conformidade'}</h2>
         <p className="breadcrumb">{selectedProject?.name} &gt; {selectedLocation}</p>
-        <div className="form-group">
-          <div className="photo-upload-area">
-            {photo ? <img src={photo} alt="Preview" className="photo-preview" /> : (
-              <div className="photo-placeholder"><Camera size={48} /><span>Toque para tirar foto</span></div>
-            )}
-            <input type="file" accept="image/*" capture="environment" onChange={(e) => handlePhotoUpload(e, setPhoto)} className="photo-input" />
+        
+        <div className="form-group" style={{marginBottom: '8px'}}>
+          <div className="photo-upload-area" style={{marginBottom: 0}}>
+            {photo ? (<img src={photo} alt="Preview" className="photo-preview" />) : (<div className="photo-placeholder"><Camera size={48} /><span>Toque para capturar imagem</span></div>)}
+            {!photo && <input type="file" accept="image/*" capture="environment" onChange={handlePhotoUpload} className="photo-input" />}
           </div>
+          
+          {/* Botões do Editor de Imagem (Apenas aparecem após inserir foto) */}
+          {photo && (
+            <div style={{display: 'flex', gap: '8px', marginTop: '8px'}}>
+              <button onClick={() => setIsEditingPhoto(true)} className="btn-outline" style={{flex: 1}}><Pencil size={18}/> Marcar Foto</button>
+              <div style={{position: 'relative', width: '44px'}}>
+                 <button className="btn-outline" style={{width: '100%', padding: '0', height: '100%', borderColor: '#ef4444', color: '#ef4444'}}><Trash2 size={18}/></button>
+                 <input type="file" accept="image/*" capture="environment" onChange={handlePhotoUpload} className="photo-input" />
+              </div>
+            </div>
+          )}
         </div>
+
         <div className="form-group">
           <label>Descrição do Problema</label>
           <textarea value={description} onChange={e => setDescription(e.target.value)} rows="3" placeholder="Descreva a não conformidade..."></textarea>
@@ -411,6 +512,33 @@ export default function App() {
           </select>
         </div>
         <button onClick={saveItem} className="btn-primary">{editingItemId ? 'Atualizar Item' : 'Salvar Item'}</button>
+      </div>
+    );
+  };
+
+  const renderPhotoEditor = () => {
+    return (
+      <div className="editor-overlay fade-in">
+        <div className="editor-header">
+           <button onClick={() => setIsEditingPhoto(false)} className="editor-header-btn"><X size={20}/> Voltar</button>
+           <span style={{fontWeight: 'bold', fontSize: '16px'}}>Marcar Imagem</span>
+           <button onClick={saveEditedPhoto} className="editor-header-btn save"><Check size={20}/> Pronto</button>
+        </div>
+        <div className="editor-canvas-container">
+           <canvas ref={canvasRef} className="editor-canvas" onMouseDown={startDrawing} onMouseMove={draw} onMouseUp={stopDrawing} onMouseOut={stopDrawing} onTouchStart={startDrawing} onTouchMove={draw} onTouchEnd={stopDrawing} onTouchCancel={stopDrawing} />
+        </div>
+        <div className="editor-toolbar">
+           <div className="editor-tools">
+             <button className={`editor-tool-btn ${drawTool === 'pencil' ? 'active' : ''}`} onClick={() => setDrawTool('pencil')}><Pencil size={24}/> Lápis</button>
+             <button className={`editor-tool-btn ${drawTool === 'arrow' ? 'active' : ''}`} onClick={() => setDrawTool('arrow')}><ArrowUpRight size={24}/> Seta</button>
+             <button className={`editor-tool-btn ${drawTool === 'circle' ? 'active' : ''}`} onClick={() => setDrawTool('circle')}><CircleIcon size={24}/> Círculo</button>
+             <div style={{width: '1px', background: '#334155', margin: '0 4px'}}></div>
+             <button className="editor-tool-btn" onClick={clearCanvas}><Undo size={24}/> Desfazer</button>
+           </div>
+           <div className="editor-colors">
+             {EDITOR_COLORS.map(color => (<button key={color} className={`editor-color-btn ${drawColor === color ? 'active' : ''}`} style={{backgroundColor: color}} onClick={() => setDrawColor(color)} />))}
+           </div>
+        </div>
       </div>
     );
   };
@@ -489,7 +617,7 @@ export default function App() {
         {!isChecklistTab && role === 'manager' && (
           <div className="action-bar-top hide-print">
             <button onClick={() => {
-               setEditingItemId(null); setPhoto(null); setDescription(''); setDiscipline(''); setView('form');
+               setEditingItemId(null); setPhoto(null); setOriginalPhoto(null); setDescription(''); setDiscipline(''); setView('form');
             }} className="fab-btn-extended">
               <Camera size={20} />
               <span>Nova Vistoria</span>
@@ -552,7 +680,7 @@ export default function App() {
   };
 
   const handleBack = () => {
-    if (view === 'form') { setView('list'); setEditingItemId(null); setPhoto(null); setDescription(''); setDiscipline(''); }
+    if (view === 'form') { setView('list'); setEditingItemId(null); setPhoto(null); setOriginalPhoto(null); setDescription(''); setDiscipline(''); }
     else if (view === 'list' && selectedLocation) { setSelectedLocation(null); setView('locations'); }
     else if (view === 'list' && !selectedLocation) setView('projects');
     else if (view === 'locations') { setSelectedStage(null); setView('stages'); }
@@ -562,6 +690,8 @@ export default function App() {
 
   return (
     <div className="app-layout">
+      {isEditingPhoto && renderPhotoEditor()}
+
       <header className="app-header hide-print">
         <div className="header-left">
           {view !== 'dashboard' && view !== 'projects' && (
