@@ -45,6 +45,7 @@ button { border: none; background: transparent; cursor: pointer; font-family: in
 
 /* Navegação Obras e Etapas */
 .list-group { display: flex; flex-direction: column; gap: 12px; }
+.list-item-wrapper:hover { border-color: #6366f1 !important; }
 .list-item { background: white; padding: 16px; border-radius: 12px; border: 1px solid #e2e8f0; display: flex; align-items: center; gap: 12px; font-weight: 600; color: #1e3a8a; transition: 0.2s; text-align: left; width: 100%; cursor: pointer; }
 .list-item:hover { border-color: #6366f1; }
 .icon-blue { color: #4f46e5; margin-right: 12px; }
