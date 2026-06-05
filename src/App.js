@@ -177,9 +177,9 @@ export default function App() {
         });
       } else {
         await addDoc(collection(db, collectionPath), {
-          projectId: selectedProject.id,
-          stageId: selectedStage.id,
-          locationId: selectedLocation,
+          projectId: selectedProject?.id || 'NO_PROJECT',
+          stageId: selectedStage?.id || 'NO_STAGE',
+          locationId: selectedLocation || 'Geral',
           photoUrl: photo,
           description,
           discipline,
@@ -274,7 +274,6 @@ export default function App() {
     <div className="page-container fade-in">
       <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center'}}>
         <h2 className="section-title mb-0">Configurações</h2>
-        <button onClick={() => setView('dashboard')} className="icon-btn"><X size={24}/></button>
       </div>
       <div style={{background: 'white', padding: '30px', borderRadius: '12px', border: '1px solid #e2e8f0', textAlign: 'center'}}>
         <Settings size={48} color="#94a3b8" style={{marginBottom: '16px', opacity: 0.5}} />
@@ -285,7 +284,13 @@ export default function App() {
   );
 
   const renderList = () => {
-    let filteredItems = items.filter(i => i.locationId === selectedLocation);
+    let filteredItems = items;
+    
+    if (selectedLocation) {
+      filteredItems = items.filter(i => i.locationId === selectedLocation);
+    } else if (selectedProject) {
+      filteredItems = items.filter(i => i.projectId === selectedProject.id);
+    }
     
     if (statusFilter === 'pending') filteredItems = filteredItems.filter(i => !i.managerApproved);
     if (statusFilter === 'completed') filteredItems = filteredItems.filter(i => i.managerApproved);
@@ -294,7 +299,7 @@ export default function App() {
     return (
       <div className="page-container fade-in">
         <div className="hide-print list-header" style={{marginBottom: '8px'}}>
-          <h2 className="section-title mb-0">Itens: {selectedLocation}</h2>
+          <h2 className="section-title mb-0">{selectedLocation ? `Itens: ${selectedLocation}` : 'Todos os Itens'}</h2>
           <button onClick={() => window.print()} className="btn-secondary">
             <Printer size={16}/> PDF
           </button>
@@ -337,6 +342,13 @@ export default function App() {
                   </div>
                   <p className="item-desc">{item.description}</p>
                   
+                  {!selectedLocation && (
+                      <p style={{fontSize: '11px', color: '#64748b', marginTop: '2px', marginBottom: '8px'}}>
+                        <strong>Obra:</strong> {INITIAL_PROJECTS.find(p => p.id === item.projectId)?.name || 'N/A'}<br/>
+                        <strong>Local:</strong> {item.locationId}
+                      </p>
+                  )}
+
                   <div className="item-status-row hide-print">
                     <button 
                       onClick={() => toggleStatus(item, 'partnerFixed')} disabled={item.managerApproved}
@@ -356,7 +368,11 @@ export default function App() {
             ))
           }
         </div>
-        <button className="fab-btn hide-print" onClick={() => { resetForm(); setView('form'); }}><Camera size={30}/></button>
+        
+        {/* Mostra botão flutuante para nova foto apenas se um local foi selecionado ou se for gerente */}
+        {(selectedLocation || role === 'manager') && (
+           <button className="fab-btn hide-print" onClick={() => { resetForm(); setView('form'); }}><Camera size={30}/></button>
+        )}
       </div>
     );
   };
@@ -367,6 +383,7 @@ export default function App() {
     else if (view === 'list' && !selectedLocation) setView('projects');
     else if (view === 'locations') { setSelectedStage(null); setView('stages'); }
     else if (view === 'stages') { setSelectedProject(null); setView('projects'); }
+    else if (view === 'settings') { setView('dashboard'); }
   };
 
   return (
@@ -380,9 +397,6 @@ export default function App() {
           <h1 className="app-title">Vistoria<span>PRO</span></h1>
         </div>
         <div className="header-right">
-          <button onClick={() => setView('settings')} className="icon-btn" title="Configurações">
-            <Settings size={20} />
-          </button>
           <div className="user-info">
             <span className="user-email">{user.email.split('@')[0]}</span>
             <span className={`user-badge ${role === 'manager' ? 'badge-manager' : 'badge-partner'}`}>
@@ -483,9 +497,17 @@ export default function App() {
         <button onClick={() => { setView('dashboard'); setSelectedProject(null); setSelectedStage(null); setSelectedLocation(null); }} className={view === 'dashboard' ? 'active' : ''}>
           <BarChart3 size={24}/><span>Status</span>
         </button>
-        <button onClick={() => { setView('projects'); setSelectedProject(null); setSelectedStage(null); setSelectedLocation(null); }} className={['projects', 'stages', 'locations', 'list', 'form'].includes(view) ? 'active' : ''}>
+        <button onClick={() => { setView('projects'); setSelectedProject(null); setSelectedStage(null); setSelectedLocation(null); }} className={['projects', 'stages', 'locations'].includes(view) ? 'active' : ''}>
           <Building2 size={24}/><span>Obras</span>
         </button>
+        <button onClick={() => { setView('list'); setSelectedProject(null); setSelectedStage(null); setSelectedLocation(null); }} className={['list', 'form'].includes(view) ? 'active' : ''}>
+          <FileText size={24}/><span>Checklists</span>
+        </button>
+        {role === 'manager' && (
+          <button onClick={() => { setView('settings'); setSelectedProject(null); setSelectedStage(null); setSelectedLocation(null); }} className={view === 'settings' ? 'active' : ''}>
+            <Settings size={24}/><span>Config</span>
+          </button>
+        )}
       </nav>
     </div>
   );
