@@ -6,7 +6,7 @@ import {
   Camera, CheckCircle, Circle, Trash2, FileText, ArrowLeft, BarChart3, 
   Filter, Printer, Building2, LogOut, Pencil, Settings, X, Undo, MousePointer2, PaintBucket
 } from 'lucide-react';
-import './App.css'; // OBRIGATÓRIO PARA O VISUAL CLÁSSICO
+import './App.css'; 
 
 const firebaseConfig = {
   apiKey: "AIzaSyCpHs7rK8IaU6bLOu9U5atqLe_Zk-PNkkE",
@@ -125,24 +125,40 @@ export default function App() {
     ? ALL_PROJECTS 
     : ALL_PROJECTS.filter(p => (projectAccess[p.id] || []).includes(user?.email.toLowerCase()));
 
+  // --- OTIMIZAÇÃO DE MEMÓRIA NA CÂMARA ---
   const handlePhotoUpload = (e) => {
     const file = e.target.files[0];
     if (!file) return;
-    const reader = new FileReader();
-    reader.onloadend = () => {
-      const img = new Image();
-      img.onload = () => {
-        const canvas = document.createElement('canvas');
-        let { width, height } = img;
-        if (width > height) { if (width > 800) { height *= 800 / width; width = 800; } } else { if (height > 800) { width *= 800 / height; height = 800; } }
-        canvas.width = width; canvas.height = height;
-        const ctx = canvas.getContext('2d');
-        ctx.drawImage(img, 0, 0, width, height);
-        setPhoto(canvas.toDataURL('image/jpeg', 0.8));
-      };
-      img.src = reader.result;
+
+    // Cria um atalho direto para o ficheiro (não carrega para a RAM como string)
+    const objectUrl = URL.createObjectURL(file);
+    const img = new Image();
+    
+    img.onload = () => {
+      const canvas = document.createElement('canvas');
+      let { width, height } = img;
+      
+      // Limite reduzido para 600px para poupar RAM extrema
+      const MAX_SIZE = 600;
+      if (width > height) { 
+        if (width > MAX_SIZE) { height *= MAX_SIZE / width; width = MAX_SIZE; } 
+      } else { 
+        if (height > MAX_SIZE) { width *= MAX_SIZE / height; height = MAX_SIZE; } 
+      }
+      
+      canvas.width = width; 
+      canvas.height = height;
+      const ctx = canvas.getContext('2d');
+      ctx.drawImage(img, 0, 0, width, height);
+      
+      // Qualidade a 60% poupa muito no Firebase e evita crashes
+      setPhoto(canvas.toDataURL('image/jpeg', 0.6));
+      
+      // Esvazia o objeto virtual da memória RAM imediatamente
+      URL.revokeObjectURL(objectUrl);
     };
-    reader.readAsDataURL(file);
+    
+    img.src = objectUrl;
   };
 
   useEffect(() => {
@@ -250,7 +266,7 @@ export default function App() {
           <h3 style={{fontSize: '16px', fontWeight: 'bold', marginBottom: '16px', color: '#1e293b'}}>Fornecedores: {configProject.name}</h3>
           <div style={{display: 'flex', gap: '8px', marginBottom: '16px'}}>
             <input type="email" placeholder="E-mail do fornecedor" className="form-input" style={{flex: 1, padding: '10px'}} value={newPartnerEmail} onChange={(e) => setNewPartnerEmail(e.target.value)} />
-            <button className="btn-primary" style={{width: 'auto', padding: '0 16px'}} onClick={async () => {
+            <button className="btn-primary" style={{width: 'auto', padding: '0 16px', margin: 0}} onClick={async () => {
               if(!newPartnerEmail) return;
               const email = newPartnerEmail.toLowerCase().trim();
               const currentList = projectAccess[configProject.id] || [];
@@ -579,10 +595,9 @@ export default function App() {
         })()}
       </main>
 
-      {/* Botão Flutuante Fixo para Nova Vistoria */}
       {view === 'list' && !isMarking && (
          <button className="fab-btn hide-print" onClick={handleNewItem}>
-           <Camera size={20}/> Nova Vistoria
+           <Camera size={20}/>
          </button>
       )}
 
