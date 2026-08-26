@@ -88,6 +88,13 @@ button:disabled { cursor: not-allowed; opacity: 0.6; }
 .check-btn.checked-partner { color: #f59e0b; }
 .check-btn.checked-manager { color: #10b981; }
 
+.role-warning { background: #fef3c7; border: 1px solid #fcd34d; color: #78350f; border-radius: 12px; padding: 14px 16px; font-size: 13px; line-height: 1.5; overflow-wrap: anywhere; }
+.role-warning code { background: rgba(120,53,15,0.1); padding: 1px 5px; border-radius: 4px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; margin: 0 2px; }
+
+.btn-load-more { width: 100%; padding: 14px; border-radius: 12px; border: 1px dashed #cbd5e1; background: transparent; color: #4f46e5; font-weight: 700; font-size: 15px; cursor: pointer; transition: 0.2s; }
+.btn-load-more:hover { background: #eef2ff; border-color: #6366f1; }
+.btn-load-more span { color: #94a3b8; font-weight: 600; font-size: 13px; }
+
 /* Configurações */
 .settings-card { background: white; padding: 16px; border-radius: 12px; border: 1px solid #e2e8f0; margin-top: 8px; }
 .settings-card-title { font-size: 16px; font-weight: bold; margin-bottom: 16px; color: #1e293b; }

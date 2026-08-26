@@ -72,9 +72,12 @@ const COLORS = ['#ef4444', '#eab308', '#3b82f6', '#000000', '#ffffff'];
 
 const PHOTO_MAX = USE_STORAGE ? 1600 : 600;   // px
 const PHOTO_QUALITY = USE_STORAGE ? 0.85 : 0.6;
-const THUMB_MAX = 320;
-const THUMB_QUALITY = 0.7;
-const IN_QUERY_LIMIT = 30; // limite do operador "in" do Firestore
+const THUMB_MAX = 240;
+const THUMB_QUALITY = 0.65;
+const IN_QUERY_LIMIT = 30;  // limite do operador "in" do Firestore
+const PAGE_SIZE = 20;       // itens renderizados por vez (protege a memória do celular)
+const MAX_HISTORY = 10;     // passos de "desfazer" guardados no editor de foto
+const PRINT_WARN_AT = 60;   // acima disso, avisa antes de montar o PDF
 
 /* ------------------------------------------------------------------ *
  * Helpers de imagem
@@ -98,6 +101,49 @@ const resizeToDataUrl = (src, maxSize, quality) => new Promise((resolve, reject)
   img.src = src;
 });
 
+const fitInside = (w, h, maxSize) => {
+  if (w >= h) {
+    return w > maxSize ? { width: maxSize, height: Math.round(h * maxSize / w) } : { width: w, height: h };
+  }
+  return h > maxSize ? { width: Math.round(w * maxSize / h), height: maxSize } : { width: w, height: h };
+};
+
+/* Lê a foto da câmera gastando o mínimo de memória possível.
+ * O caminho antigo (new Image() + object URL) deixava a imagem de 12 MP
+ * decodificada na memória até o coletor de lixo passar — em celular com
+ * pouca RAM isso derrubava a aba. createImageBitmap permite liberar o
+ * bitmap na hora, com close(), e ainda corrige a rotação pelo EXIF. */
+const fileToDataUrl = async (file, maxSize, quality) => {
+  if (typeof createImageBitmap === 'function') {
+    let bitmap = null;
+    let canvas = null;
+    try {
+      bitmap = await createImageBitmap(file, { imageOrientation: 'from-image' });
+      const { width, height } = fitInside(bitmap.width, bitmap.height, maxSize);
+      canvas = document.createElement('canvas');
+      canvas.width = width;
+      canvas.height = height;
+      canvas.getContext('2d').drawImage(bitmap, 0, 0, width, height);
+      bitmap.close();
+      bitmap = null;
+      const out = canvas.toDataURL('image/jpeg', quality);
+      canvas.width = 0; canvas.height = 0;   // devolve o buffer do canvas na hora
+      return out;
+    } catch (err) {
+      if (bitmap) { try { bitmap.close(); } catch (e) { /* ignora */ } }
+      if (canvas) { canvas.width = 0; canvas.height = 0; }
+      // segue para o caminho antigo
+    }
+  }
+
+  const objectUrl = URL.createObjectURL(file);
+  try {
+    return await resizeToDataUrl(objectUrl, maxSize, quality);
+  } finally {
+    URL.revokeObjectURL(objectUrl);
+  }
+};
+
 const isDataUrl = (value) => typeof value === 'string' && value.startsWith('data:');
 
 /* ------------------------------------------------------------------ *
@@ -106,6 +152,7 @@ const isDataUrl = (value) => typeof value === 'string' && value.startsWith('data
 export default function App() {
   const [user, setUser] = useState(null);
   const [role, setRole] = useState('partner');
+  const [roleSource, setRoleSource] = useState('db');
   const [loginEmail, setLoginEmail] = useState('');
   const [loginPassword, setLoginPassword] = useState('');
   const [loadingAuth, setLoadingAuth] = useState(true);
@@ -126,6 +173,7 @@ export default function App() {
 
   const [statusFilter, setStatusFilter] = useState('all');
   const [disciplineFilter, setDisciplineFilter] = useState('all');
+  const [visibleCount, setVisibleCount] = useState(PAGE_SIZE);
 
   const [editingItem, setEditingItem] = useState(null);
   const [photo, setPhoto] = useState(null);          // dataURL (novo) ou URL https (existente)
@@ -173,15 +221,22 @@ export default function App() {
       // Perfil: coleção `roles` (mesma fonte usada pelas Security Rules),
       // com fallback para a lista local caso o documento ainda não exista.
       let resolvedRole = EMAILS_GERENCIA.includes(email) ? 'manager' : 'partner';
+      let source = 'db';
       try {
         const roleSnap = await getDoc(doc(db, 'roles', email));
         if (roleSnap.exists()) {
           resolvedRole = roleSnap.data().role === 'manager' ? 'manager' : 'partner';
+        } else if (resolvedRole === 'manager') {
+          // O app acha que é gerente, mas o banco não confirma — e são as
+          // regras do banco que mandam. Sinaliza em vez de mentir na tela.
+          source = 'fallback';
         }
       } catch (e) {
-        console.warn('Não foi possível ler o perfil em /roles, usando fallback local.', e);
+        console.warn('Não foi possível ler o perfil em /roles.', e);
+        source = 'error';
       }
       setRole(resolvedRole);
+      setRoleSource(source);
 
       unsubs.push(onSnapshot(collection(db, 'project_access'), (snap) => {
         const accessMap = {};
@@ -261,19 +316,23 @@ export default function App() {
     return () => unsub();
   }, [user, role, selectedProjectId, visibleIdsKey]);
 
+  // Sempre que o recorte muda, volta a exibir só a primeira página.
+  const selectedStageId = selectedStage?.id || null;
+  useEffect(() => {
+    setVisibleCount(PAGE_SIZE);
+  }, [selectedProjectId, selectedStageId, selectedLocation, statusFilter, disciplineFilter]);
+
   /* ---------------- Foto: upload para o Storage ---------------- */
   const handlePhotoUpload = async (e) => {
     const file = e.target.files[0];
     if (!file) return;
-    const objectUrl = URL.createObjectURL(file);
     try {
-      const dataUrl = await resizeToDataUrl(objectUrl, PHOTO_MAX, PHOTO_QUALITY);
+      const dataUrl = await fileToDataUrl(file, PHOTO_MAX, PHOTO_QUALITY);
       setPhoto(dataUrl);
       setPhotoDirty(true);
     } catch (err) {
-      alert('Não foi possível ler a imagem selecionada.');
+      alert('Não foi possível ler a imagem selecionada. Tente tirar a foto novamente.');
     } finally {
-      URL.revokeObjectURL(objectUrl);
       e.target.value = '';
     }
   };
@@ -403,7 +462,12 @@ export default function App() {
     if (!isDrawingRef.current) return;
     isDrawingRef.current = false;
     const snapshot = canvasRef.current.toDataURL('image/jpeg', 0.92);
-    setDrawingHistory(prev => [...prev, snapshot]);
+    // Guarda no máximo MAX_HISTORY passos: cada um é uma cópia inteira da
+    // imagem, e um histórico sem limite consumia memória a cada traço.
+    setDrawingHistory(prev => {
+      const next = [...prev, snapshot];
+      return next.length > MAX_HISTORY ? next.slice(next.length - MAX_HISTORY) : next;
+    });
   };
 
   const undoDrawing = () => {
@@ -463,7 +527,14 @@ export default function App() {
       if (photoDirty || isDataUrl(photo)) {
         photoFields = USE_STORAGE
           ? await uploadPhoto(photo, formProject)
-          : { photoUrl: photo }; // plano B: mantém o base64 no documento
+          : {
+              // Plano B: a foto continua no documento, mas junto vai uma
+              // miniatura pequena. A lista passa a exibir só a miniatura —
+              // é o que impede o celular de decodificar dezenas de imagens
+              // grandes ao mesmo tempo.
+              photoUrl: photo,
+              thumbUrl: await resizeToDataUrl(photo, THUMB_MAX, THUMB_QUALITY)
+            };
       }
 
       if (editingItem) {
@@ -682,6 +753,23 @@ export default function App() {
       : [];
 
     const doneCount = filteredItems.filter(i => i.managerApproved).length;
+    const shownItems = filteredItems.slice(0, visibleCount);
+    const remaining = filteredItems.length - shownItems.length;
+
+    // O PDF sai do que está na tela, então antes de imprimir é preciso
+    // exibir todos os itens do recorte atual.
+    const handlePrint = () => {
+      if (filteredItems.length > PRINT_WARN_AT && !window.confirm(
+        `Este relatório tem ${filteredItems.length} itens. Montar tudo de uma vez pode travar o celular.\n\nRecomendado: filtre por local ou etapa antes de gerar o PDF.\n\nDeseja continuar mesmo assim?`
+      )) return;
+
+      if (remaining > 0) {
+        setVisibleCount(filteredItems.length);
+        window.setTimeout(() => window.print(), 500);
+      } else {
+        window.print();
+      }
+    };
 
     return (
       <div className="page-container fade-in">
@@ -703,7 +791,7 @@ export default function App() {
 
         <div className="hide-print list-header" style={{ marginBottom: '8px' }}>
           <h2 className="section-title mb-0">{selectedLocation ? `Itens: ${selectedLocation}` : 'Checklist Geral'}</h2>
-          <button onClick={() => window.print()} className="btn-secondary"><Printer size={16} /> PDF</button>
+          <button onClick={handlePrint} className="btn-secondary"><Printer size={16} /> PDF</button>
         </div>
 
         <div className="filter-panel hide-print">
@@ -746,14 +834,14 @@ export default function App() {
             ? <p className="empty-state">Carregando vistorias...</p>
             : filteredItems.length === 0
               ? <p className="empty-state">Nenhum registro encontrado.</p>
-              : filteredItems.map(item => (
+              : shownItems.map(item => (
                 <div key={item.id} className={`checklist-item ${item.managerApproved ? 'approved' : ''}`}>
                   <button
                     className="item-thumbnail"
                     onClick={() => item.photoUrl && setLightbox(item.photoUrl)}
                     title="Ampliar foto"
                   >
-                    <img src={item.thumbUrl || item.photoUrl} alt="Vistoria" loading="lazy" />
+                    <img src={item.thumbUrl || item.photoUrl} alt="Vistoria" loading="lazy" decoding="async" />
                   </button>
                   <div className="item-content">
                     <div className="item-header-row">
@@ -800,6 +888,13 @@ export default function App() {
               ))
           }
         </div>
+
+        {remaining > 0 && (
+          <button className="btn-load-more hide-print" onClick={() => setVisibleCount(c => c + PAGE_SIZE)}>
+            Mostrar mais {Math.min(PAGE_SIZE, remaining)}
+            <span> · restam {remaining}</span>
+          </button>
+        )}
       </div>
     );
   };
@@ -869,7 +964,7 @@ export default function App() {
         </div>
         <div className="header-right">
           <div className="user-info">
-            <span className="user-email">{user.email.split('@')[0]}</span>
+            <span className="user-email" title={user.email}>{user.email.split('@')[0]}</span>
             <span className={`user-badge ${role === 'manager' ? 'badge-manager' : 'badge-partner'}`}>
               {role === 'manager' ? 'Gerente' : 'Parceiro'}
             </span>
@@ -882,6 +977,15 @@ export default function App() {
         {view === 'dashboard' && (
           <div className="page-container fade-in">
             <h2 className="section-title">Painel de Resumo</h2>
+
+            {(roleSource === 'fallback' || roleSource === 'error') && (
+              <div className="role-warning">
+                <strong>Perfil não confirmado no banco.</strong> O app está te tratando como gerente
+                pela lista interna, mas não encontrou o documento <code>{userEmail}</code> na coleção
+                <code>roles</code>. Enquanto isso, aprovar e excluir vão falhar. Conectado como{' '}
+                <strong>{userEmail}</strong>.
+              </div>
+            )}
             <div className="stats-grid">
               <div className="stat-card">
                 <span className="stat-value">{items.length}</span>
