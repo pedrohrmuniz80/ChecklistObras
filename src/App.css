@@ -1,6 +1,7 @@
 *{ box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
 body { background-color: #f8fafc; color: #0f172a; -webkit-font-smoothing: antialiased; }
 button { border: none; background: transparent; cursor: pointer; font-family: inherit; }
+button:disabled { cursor: not-allowed; opacity: 0.6; }
 
 .app-layout { min-height: 100vh; padding-bottom: 80px; }
 
@@ -45,13 +46,19 @@ button { border: none; background: transparent; cursor: pointer; font-family: in
 
 /* Navegação Obras e Etapas */
 .list-group { display: flex; flex-direction: column; gap: 12px; }
-.list-item-wrapper:hover { border-color: #6366f1 !important; }
+/* CORRIGIDO: o wrapper não era flex, por isso o ícone de excluir caía abaixo do card */
+.list-item-wrapper { display: flex; align-items: stretch; gap: 8px; }
 .list-item { background: white; padding: 16px; border-radius: 12px; border: 1px solid #e2e8f0; display: flex; align-items: center; gap: 12px; font-weight: 600; color: #1e3a8a; transition: 0.2s; text-align: left; width: 100%; cursor: pointer; }
 .list-item:hover { border-color: #6366f1; }
-.icon-blue { color: #4f46e5; margin-right: 12px; }
+.list-item.dashed { border-style: dashed; border-color: #cbd5e1; color: #4f46e5; justify-content: center; font-weight: 700; background: transparent; }
+.list-item.dashed:hover { background: #eef2ff; border-color: #6366f1; }
+.btn-delete-item { flex-shrink: 0; width: 52px; border-radius: 12px; border: 1px solid #fee2e2; background: #fef2f2; color: #ef4444; display: flex; align-items: center; justify-content: center; transition: 0.2s; }
+.btn-delete-item:hover { background: #fee2e2; border-color: #fca5a5; }
+.icon-blue { color: #4f46e5; display: flex; align-items: center; }
 .grid-locations { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; }
 .location-card { background: white; padding: 20px 10px; border-radius: 12px; border: 1px solid #e2e8f0; display: flex; align-items: center; justify-content: center; position: relative; font-weight: 600; color: #334155; transition: 0.2s; cursor: pointer; }
 .location-card:hover { background: #eef2ff; border-color: #6366f1; }
+.location-card.dashed { border-style: dashed; border-color: #cbd5e1; color: #4f46e5; font-weight: 700; background: transparent; }
 
 /* Filtros */
 .list-header { display: flex; justify-content: space-between; align-items: center; }
@@ -66,21 +73,28 @@ button { border: none; background: transparent; cursor: pointer; font-family: in
 .empty-state { text-align: center; color: #94a3b8; padding: 40px 0; font-weight: 500; }
 .checklist-item { display: flex; gap: 16px; background: white; padding: 16px; border-radius: 12px; border: 1px solid #e2e8f0; margin-bottom: 12px; box-shadow: 0 1px 3px rgba(0,0,0,0.05); }
 .checklist-item.approved { border-color: #10b981; background: #f0fdf4; }
-.item-thumbnail { width: 80px; height: 80px; border-radius: 8px; background: #f1f5f9; flex-shrink: 0; border: 1px solid #e2e8f0; overflow: hidden; display: flex; align-items: center; justify-content: center; }
+.item-thumbnail { width: 80px; height: 80px; border-radius: 8px; background: #f1f5f9; flex-shrink: 0; border: 1px solid #e2e8f0; overflow: hidden; display: flex; align-items: center; justify-content: center; padding: 0; cursor: zoom-in; }
 .item-thumbnail img { width: 100%; height: 100%; object-fit: cover; }
-.item-content { flex: 1; display: flex; flex-direction: column; justify-content: space-between; }
+.item-content { flex: 1; display: flex; flex-direction: column; justify-content: space-between; min-width: 0; }
 .item-header-row { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 6px; }
 .tag-discipline { font-size: 10px; font-weight: 800; background: #e0e7ff; color: #3730a3; padding: 4px 8px; border-radius: 6px; text-transform: uppercase; display: inline-block; }
 .item-actions-top { display: flex; gap: 12px; }
 .btn-edit { color: #64748b; padding: 0; background: transparent; border: none; cursor: pointer; } .btn-edit:hover { color: #4f46e5; }
 .btn-delete { color: #f87171; padding: 0; background: transparent; border: none; cursor: pointer; } .btn-delete:hover { color: #ef4444; }
-.item-desc { font-size: 14px; font-weight: 600; color: #1e293b; line-height: 1.4; margin-bottom: 12px; }
+.item-desc { font-size: 14px; font-weight: 600; color: #1e293b; line-height: 1.4; margin-bottom: 12px; overflow-wrap: anywhere; }
+.item-meta { font-size: 11px; color: #64748b; margin-top: 2px; margin-bottom: 8px; }
 .item-status-row { display: flex; gap: 16px; padding-top: 12px; border-top: 1px solid #f1f5f9; }
 .check-btn { display: flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 700; color: #94a3b8; background: transparent; border: none; cursor: pointer; }
 .check-btn.checked-partner { color: #f59e0b; }
 .check-btn.checked-manager { color: #10b981; }
 
+/* Configurações */
+.settings-card { background: white; padding: 16px; border-radius: 12px; border: 1px solid #e2e8f0; margin-top: 8px; }
+.settings-card-title { font-size: 16px; font-weight: bold; margin-bottom: 16px; color: #1e293b; }
+.access-row { display: flex; justify-content: space-between; align-items: center; padding: 12px; background: #f8fafc; border-radius: 8px; border: 1px solid #e2e8f0; overflow-wrap: anywhere; gap: 8px; }
+
 /* Formulário e Editor Canvas */
+.form-card { background: white; padding: 20px; border-radius: 12px; border: 1px solid #e2e8f0; }
 .form-group { margin-bottom: 16px; }
 .form-label { display: block; font-size: 12px; font-weight: 800; color: #475569; text-transform: uppercase; margin-bottom: 8px; }
 .form-input { width: 100%; padding: 14px; border-radius: 8px; border: 1px solid #cbd5e1; font-size: 15px; background: white; outline: none; }
@@ -88,11 +102,21 @@ button { border: none; background: transparent; cursor: pointer; font-family: in
 .photo-upload-area { width: 100%; height: 200px; background: #f1f5f9; border-radius: 12px; position: relative; overflow: hidden; display: flex; align-items: center; justify-content: center; border: 2px dashed #cbd5e1; margin-bottom: 20px; }
 .photo-placeholder { display: flex; flex-direction: column; align-items: center; color: #94a3b8; font-weight: 500; font-size: 14px; gap: 8px; }
 .photo-input { position: absolute; inset: 0; width: 100%; height: 100%; opacity: 0; cursor: pointer; }
+.photo-preview-wrapper { position: relative; width: 100%; height: 220px; background: #000; border-radius: 12px; overflow: hidden; margin-bottom: 8px; }
+.photo-preview-wrapper img { width: 100%; height: 100%; object-fit: contain; }
+.btn-mark { position: absolute; bottom: 12px; left: 50%; transform: translateX(-50%); background: #3b82f6; color: white; padding: 8px 16px; border-radius: 99px; font-weight: bold; display: flex; gap: 6px; align-items: center; }
+.btn-photo-remove { position: absolute; top: 12px; right: 12px; background: rgba(0,0,0,0.6); color: white; padding: 8px; border-radius: 50%; display: flex; }
 
 .btn-primary { width: 100%; background: #4f46e5; color: white; border-radius: 8px; font-weight: bold; padding: 16px; border: none; cursor: pointer; transition: 0.2s; font-size: 16px; box-shadow: 0 4px 6px -1px rgba(79, 70, 229, 0.2); }
 .btn-primary:active { transform: scale(0.98); }
+.btn-primary.btn-inline { width: auto; padding: 10px 16px; margin: 0; font-size: 15px; }
 .fab-btn { position: fixed; bottom: 90px; right: 20px; width: 60px; height: 60px; background: #4f46e5; color: white; border-radius: 50%; display: flex; align-items: center; justify-content: center; box-shadow: 0 4px 12px rgba(79, 70, 229, 0.4); z-index: 20; transition: 0.2s; cursor: pointer; }
 .fab-btn:active { transform: scale(0.95); }
+
+/* Lightbox da foto */
+.lightbox { position: fixed; inset: 0; background: rgba(0,0,0,0.92); z-index: 120; display: flex; align-items: center; justify-content: center; padding: 20px; cursor: zoom-out; }
+.lightbox img { max-width: 100%; max-height: 100%; object-fit: contain; border-radius: 8px; }
+.lightbox-close { position: absolute; top: 16px; right: 16px; color: white; background: rgba(255,255,255,0.15); border-radius: 50%; padding: 8px; display: flex; }
 
 /* Editor de Fotos Native */
 .markup-modal { position: fixed; inset: 0; background: #1e293b; z-index: 100; display: flex; flex-direction: column; }
@@ -118,11 +142,33 @@ button { border: none; background: transparent; cursor: pointer; font-family: in
 .hide-screen { display: none; }
 .text-muted { color: #64748b; }
 
+/* ------------------------------------------------------------------ *
+ * Impressão / PDF
+ * ------------------------------------------------------------------ */
 @media print {
-.app-layout { padding-bottom: 0; background: white; }
-.hide-print { display: none !important; }
-.hide-screen { display: block; }
-.checklist-item { break-inside: avoid; border: none; border-bottom: 1px solid #ccc; padding: 10px 0; box-shadow: none; margin-bottom: 0; }
-.item-desc { -webkit-line-clamp: unset; }
-.check-btn { color: black !important; opacity: 1 !important; }
+  @page { size: A4; margin: 14mm 12mm; }
+
+  .app-layout { padding-bottom: 0; background: white; }
+  .app-main { max-width: none; }
+  .page-container { padding: 0; gap: 0; }
+  .hide-print { display: none !important; }
+  .hide-screen { display: block; }
+
+  .print-header { margin-bottom: 16px; padding-bottom: 12px; border-bottom: 2px solid #1e3a8a; }
+  .print-header h1 { font-size: 16pt; color: #1e3a8a; margin-bottom: 6px; }
+  .print-header p { font-size: 9pt; color: #334155; line-height: 1.6; }
+
+  .checklist { gap: 0; }
+  .checklist-item { break-inside: avoid; page-break-inside: avoid; border: none; border-bottom: 1px solid #cbd5e1; padding: 10px 0; box-shadow: none; margin-bottom: 0; background: white !important; gap: 12px; }
+  .item-thumbnail { width: 90px; height: 90px; border: 1px solid #cbd5e1; }
+  .item-desc { font-size: 10pt; -webkit-line-clamp: unset; margin-bottom: 6px; }
+  .item-meta { font-size: 8pt; }
+  .tag-discipline { border: 1px solid #94a3b8; background: white !important; color: #1e293b !important; }
+
+  /* Status legível no PDF (antes ficava oculto junto com os botões) */
+  .print-status { display: inline-block; font-size: 9pt; font-weight: 800; padding: 3px 8px; border-radius: 4px; border: 1px solid currentColor; }
+  .print-status.ok { color: #047857; }
+  .print-status.pend { color: #b45309; }
+
+  a[href]:after { content: ""; }
 }
