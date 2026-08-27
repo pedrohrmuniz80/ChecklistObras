@@ -1,29 +1,37 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { initializeApp } from 'firebase/app';
 import { getAuth, signInWithEmailAndPassword, signOut, onAuthStateChanged } from 'firebase/auth';
-import { getFirestore, collection, onSnapshot, addDoc, updateDoc, deleteDoc, doc, setDoc } from 'firebase/firestore';
-import { 
-  Camera, CheckCircle, Circle, Trash2, FileText, ArrowLeft, BarChart3, 
-  Filter, Printer, Building2, LogOut, Pencil, Settings, X, Undo, MousePointer2, PaintBucket
+import {
+  getFirestore, collection, onSnapshot, addDoc, updateDoc, deleteDoc, doc, setDoc,
+  getDoc, getDocs, query, where, writeBatch, deleteField,
+  orderBy, limit, startAfter, documentId
+} from 'firebase/firestore';
+import {
+  Camera, CheckCircle, Circle, Trash2, FileText, ArrowLeft, BarChart3,
+  Filter, Printer, Building2, LogOut, Pencil, Settings, X, Undo, MousePointer2,
+  PaintBucket, Image as ImageIcon, RotateCcw
 } from 'lucide-react';
+import './App.css';
 
-
-// --- 1. CONFIGURAÇÃO DO FIREBASE ---
+/* ------------------------------------------------------------------ *
+ * Configuração
+ * ------------------------------------------------------------------ */
 const firebaseConfig = {
-  apiKey: "AIzaSyCpHs7rK8IaU6bLOu9U5atqLe_Zk-PNkkE",
-  authDomain: "check-list-obras.firebaseapp.com",
-  projectId: "check-list-obras",
-  storageBucket: "check-list-obras.firebasestorage.app",
-  messagingSenderId: "154186862082",
-  appId: "1:154186862082:web:8b12debd3789521894611b"
+  apiKey:            process.env.REACT_APP_FB_API_KEY     || "AIzaSyCpHs7rK8IaU6bLOu9U5atqLe_Zk-PNkkE",
+  authDomain:        process.env.REACT_APP_FB_AUTH_DOMAIN || "check-list-obras.firebaseapp.com",
+  projectId:         process.env.REACT_APP_FB_PROJECT_ID  || "check-list-obras",
+  storageBucket:     process.env.REACT_APP_FB_BUCKET      || "check-list-obras.firebasestorage.app",
+  messagingSenderId: process.env.REACT_APP_FB_SENDER_ID   || "154186862082",
+  appId:             process.env.REACT_APP_FB_APP_ID      || "1:154186862082:web:8b12debd3789521894611b"
 };
 
 const app = initializeApp(firebaseConfig);
 const auth = getAuth(app);
 const db = getFirestore(app);
-const collectionPath = 'checklists';
 
-// --- 2. DEFINIÇÃO DE PERFIS E DADOS FIXOS ---
+const collectionPath = 'checklists';   // registro da vistoria (leve: só a miniatura)
+const photosPath = 'photos';           // foto em tamanho cheio, um documento por vistoria
+
 const EMAILS_GERENCIA = [
   'pedro.ctr@deville.com.br', 'stephanie.ctr@deville.com.br',
   'alan.ctr@deville.com.br', 'raphael.ctr@deville.com.br', 'jessica.ctr@deville.com.br'
@@ -46,272 +54,973 @@ const STAGES = {
 const DISCIPLINES = ['Civil', 'Pintura', 'Hidráulica', 'Elétrica', 'Manutenção', 'Limpeza', 'Marcenaria', 'Marmoraria', 'EC'];
 const COLORS = ['#ef4444', '#eab308', '#3b82f6', '#000000', '#ffffff'];
 
+const PHOTO_MAX = 1280;
+const PHOTO_QUALITY = 0.72;
+const PHOTO_BYTES_LIMIT = 900000;  // margem sob o teto de 1 MB por documento
+const THUMB_MAX = 240;
+const THUMB_QUALITY = 0.65;
+const IN_QUERY_LIMIT = 30;
+const PAGE_SIZE = 20;
+const MAX_HISTORY = 10;
+const PRINT_WARN_AT = 60;
+const SLOW_BOOT_MS = 6000;
+const BOOT_TIMEOUT_MS = 20000;
+const MIGRATION_CHUNK = 15;
+const DRAFT_KEY = 'vistoriapro-rascunho-v1';
+const LOGO_URL = `${process.env.PUBLIC_URL || ''}/logo-deville.png`;
+
+/* ------------------------------------------------------------------ *
+ * Helpers de imagem
+ * ------------------------------------------------------------------ */
+const fitInside = (w, h, maxSize) => {
+  if (w >= h) {
+    return w > maxSize ? { width: maxSize, height: Math.round(h * maxSize / w) } : { width: w, height: h };
+  }
+  return h > maxSize ? { width: Math.round(w * maxSize / h), height: maxSize } : { width: w, height: h };
+};
+
+const drawToDataUrl = (source, sw, sh, maxSize, quality) => {
+  const { width, height } = fitInside(sw, sh, maxSize);
+  const canvas = document.createElement('canvas');
+  canvas.width = width;
+  canvas.height = height;
+  canvas.getContext('2d').drawImage(source, 0, 0, width, height);
+  const out = canvas.toDataURL('image/jpeg', quality);
+  canvas.width = 0; canvas.height = 0;   // devolve o buffer na hora
+  return out;
+};
+
+const resizeToDataUrl = (src, maxSize, quality) => new Promise((resolve, reject) => {
+  const img = new Image();
+  img.onload = () => {
+    try { resolve(drawToDataUrl(img, img.width, img.height, maxSize, quality)); }
+    catch (e) { reject(e); }
+  };
+  img.onerror = reject;
+  img.src = src;
+});
+
+/* Lê um arquivo (galeria ou câmera do sistema) gastando o mínimo de memória.
+ * createImageBitmap permite liberar o bitmap na hora com close(), em vez de
+ * esperar o coletor de lixo, e ainda corrige a rotação pelo EXIF. */
+const fileToDataUrl = async (file, maxSize, quality) => {
+  if (typeof createImageBitmap === 'function') {
+    let bitmap = null;
+    try {
+      bitmap = await createImageBitmap(file, { imageOrientation: 'from-image' });
+      const out = drawToDataUrl(bitmap, bitmap.width, bitmap.height, maxSize, quality);
+      bitmap.close();
+      return out;
+    } catch (err) {
+      if (bitmap) { try { bitmap.close(); } catch (e) { /* ignora */ } }
+    }
+  }
+  const objectUrl = URL.createObjectURL(file);
+  try { return await resizeToDataUrl(objectUrl, maxSize, quality); }
+  finally { URL.revokeObjectURL(objectUrl); }
+};
+
+// Garante que a foto cabe com folga em um documento do Firestore.
+const fitDocumentLimit = async (dataUrl) => {
+  let out = dataUrl;
+  let quality = PHOTO_QUALITY;
+  while (out.length > PHOTO_BYTES_LIMIT && quality > 0.35) {
+    quality -= 0.12;
+    out = await resizeToDataUrl(out, PHOTO_MAX, quality);
+  }
+  return out;
+};
+
+const isDataUrl = (value) => typeof value === 'string' && value.startsWith('data:');
+
+/* ------------------------------------------------------------------ *
+ * Rascunho — sobrevive ao app ser encerrado pelo sistema
+ * ------------------------------------------------------------------ */
+const readDraft = () => {
+  try {
+    const raw = window.localStorage.getItem(DRAFT_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch (e) { return null; }
+};
+const writeDraft = (draft) => {
+  try { window.localStorage.setItem(DRAFT_KEY, JSON.stringify(draft)); } catch (e) { /* cheio ou bloqueado */ }
+};
+const clearDraft = () => {
+  try { window.localStorage.removeItem(DRAFT_KEY); } catch (e) { /* ignora */ }
+};
+const draftHasContent = (d) => !!d && !!(d.photo || d.description || d.discipline || d.formLocation);
+
+/* ------------------------------------------------------------------ *
+ * Componente
+ * ------------------------------------------------------------------ */
 export default function App() {
   const [user, setUser] = useState(null);
   const [role, setRole] = useState('partner');
+  const [roleSource, setRoleSource] = useState('db');
   const [loginEmail, setLoginEmail] = useState('');
   const [loginPassword, setLoginPassword] = useState('');
   const [loadingAuth, setLoadingAuth] = useState(true);
-  const [view, setView] = useState('dashboard'); 
+  const [cadastrosReady, setCadastrosReady] = useState(false);
+  const [itemsReady, setItemsReady] = useState(false);
+  const [booted, setBooted] = useState(false);
+  const [slowBoot, setSlowBoot] = useState(false);
+  const [view, setView] = useState('dashboard');
 
   const [items, setItems] = useState([]);
+  const [loadingItems, setLoadingItems] = useState(false);
   const [projectAccess, setProjectAccess] = useState({});
   const [customProjects, setCustomProjects] = useState([]);
   const [customStages, setCustomStages] = useState([]);
   const [customLocations, setCustomLocations] = useState([]);
-  
+
   const [selectedProject, setSelectedProject] = useState(null);
   const [selectedStage, setSelectedStage] = useState(null);
   const [selectedLocation, setSelectedLocation] = useState(null);
   const [configProject, setConfigProject] = useState(null);
   const [newPartnerEmail, setNewPartnerEmail] = useState('');
-  
-  const [statusFilter, setStatusFilter] = useState('all');
-  const [disciplineFilter, setDisciplineFilter] = useState('all');
 
-  const [editingId, setEditingId] = useState(null);
+  const [statusFilter, setStatusFilter] = useState('all');
+  const [pickedDisciplines, setPickedDisciplines] = useState([]);  // vazio = todas
+  const [visibleCount, setVisibleCount] = useState(PAGE_SIZE);
+
+  const [editingItem, setEditingItem] = useState(null);
   const [photo, setPhoto] = useState(null);
+  const [photoDirty, setPhotoDirty] = useState(false);
+  const [loadingPhoto, setLoadingPhoto] = useState(false);
+  const [saving, setSaving] = useState(false);
   const [description, setDescription] = useState('');
   const [discipline, setDiscipline] = useState('');
-  
-  // Estados para o formulário (campos selecionados no modal de edição/inclusão)
+  const [lightbox, setLightbox] = useState(null);
+
   const [formProject, setFormProject] = useState('');
   const [formStage, setFormStage] = useState('');
   const [formLocation, setFormLocation] = useState('');
 
+  const [pendingDraft, setPendingDraft] = useState(null);
+  const [migration, setMigration] = useState(null);
+
+  const [cameraOn, setCameraOn] = useState(false);
+  const [cameraError, setCameraError] = useState('');
+  const videoRef = useRef(null);
+  const streamRef = useRef(null);
+  const galleryInputRef = useRef(null);
+  const systemCameraInputRef = useRef(null);
+
   const [isMarking, setIsMarking] = useState(false);
-  
   const canvasRef = useRef(null);
+  const snapshotRef = useRef(null);
+  const isDrawingRef = useRef(false);
+  const startPosRef = useRef({ x: 0, y: 0 });
   const [drawMode, setDrawMode] = useState('pencil');
   const [color, setColor] = useState(COLORS[0]);
   const [drawingHistory, setDrawingHistory] = useState([]);
-  const [isDrawing, setIsDrawing] = useState(false);
-  const [startPos, setStartPos] = useState({ x: 0, y: 0 });
-  const [currentCanvasState, setCurrentCanvasState] = useState(null);
 
+  const userEmail = (user?.email || '').toLowerCase();
+  const lastUidRef = useRef(undefined);
+
+  /* ---------------- Auth + listeners de cadastro ---------------- */
   useEffect(() => {
     let unsubs = [];
-    const unsubscribeAuth = onAuthStateChanged(auth, (loggedUser) => {
+    const unsubscribeAuth = onAuthStateChanged(auth, async (loggedUser) => {
+      unsubs.forEach(u => u());
+      unsubs = [];
+
       setUser(loggedUser);
       setLoadingAuth(false);
-      
-      if (loggedUser) {
-        setRole(EMAILS_GERENCIA.includes(loggedUser.email.toLowerCase()) ? 'manager' : 'partner');
 
-        unsubs.push(onSnapshot(collection(db, collectionPath), (snap) => {
-          setItems(snap.docs.map(doc => ({ id: doc.id, ...doc.data() })).sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt)));
-        }));
-
-        unsubs.push(onSnapshot(collection(db, 'project_access'), (snap) => {
-          const accessMap = {};
-          snap.docs.forEach(doc => { accessMap[doc.id] = doc.data().authorizedEmails || []; });
-          setProjectAccess(accessMap);
-        }));
-
-        unsubs.push(onSnapshot(collection(db, 'custom_projects'), (snap) => {
-          setCustomProjects(snap.docs.map(doc => ({ id: doc.id, ...doc.data() })));
-        }));
-
-        unsubs.push(onSnapshot(collection(db, 'custom_stages'), (snap) => {
-          setCustomStages(snap.docs.map(doc => ({ id: doc.id, ...doc.data() })));
-        }));
-
-        unsubs.push(onSnapshot(collection(db, 'custom_locations'), (snap) => {
-          setCustomLocations(snap.docs.map(doc => ({ id: doc.id, ...doc.data() })));
-        }));
-      } else {
-        unsubs.forEach(unsub => unsub());
+      const uid = loggedUser ? loggedUser.uid : null;
+      if (uid !== lastUidRef.current) {
+        lastUidRef.current = uid;
+        setCadastrosReady(false);
+        setItemsReady(false);
+        setBooted(false);
+        setSlowBoot(false);
       }
+
+      if (!loggedUser) {
+        setRole('partner');
+        setItems([]);
+        setProjectAccess({});
+        setCustomProjects([]); setCustomStages([]); setCustomLocations([]);
+        return;
+      }
+
+      const email = loggedUser.email.toLowerCase();
+
+      let resolvedRole = EMAILS_GERENCIA.includes(email) ? 'manager' : 'partner';
+      let source = 'db';
+      try {
+        const roleSnap = await getDoc(doc(db, 'roles', email));
+        if (roleSnap.exists()) {
+          resolvedRole = roleSnap.data().role === 'manager' ? 'manager' : 'partner';
+        } else if (resolvedRole === 'manager') {
+          source = 'fallback';
+        }
+      } catch (e) {
+        console.warn('Não foi possível ler o perfil em /roles.', e);
+        source = 'error';
+      }
+      setRole(resolvedRole);
+      setRoleSource(source);
+
+      const arrived = new Set();
+      const markArrived = (name) => {
+        arrived.add(name);
+        if (arrived.size === 4) setCadastrosReady(true);
+      };
+
+      unsubs.push(onSnapshot(collection(db, 'project_access'), (snap) => {
+        const accessMap = {};
+        snap.docs.forEach(d => { accessMap[d.id] = d.data().authorizedEmails || []; });
+        setProjectAccess(accessMap);
+        markArrived('project_access');
+      }, () => markArrived('project_access')));
+
+      unsubs.push(onSnapshot(collection(db, 'custom_projects'), (snap) => {
+        setCustomProjects(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+        markArrived('custom_projects');
+      }, () => markArrived('custom_projects')));
+
+      unsubs.push(onSnapshot(collection(db, 'custom_stages'), (snap) => {
+        setCustomStages(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+        markArrived('custom_stages');
+      }, () => markArrived('custom_stages')));
+
+      unsubs.push(onSnapshot(collection(db, 'custom_locations'), (snap) => {
+        setCustomLocations(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+        markArrived('custom_locations');
+      }, () => markArrived('custom_locations')));
     });
-    return () => { unsubscribeAuth(); unsubs.forEach(unsub => unsub()); };
+
+    return () => { unsubscribeAuth(); unsubs.forEach(u => u()); };
   }, []);
 
-  const ALL_PROJECTS = [...INITIAL_PROJECTS, ...customProjects];
-  
-  const visibleProjects = role === 'manager' 
-    ? ALL_PROJECTS 
-    : ALL_PROJECTS.filter(p => (projectAccess[p.id] || []).includes(user?.email.toLowerCase()));
+  const ALL_PROJECTS = useMemo(() => [...INITIAL_PROJECTS, ...customProjects], [customProjects]);
 
-  const handlePhotoUpload = (e) => {
-    const file = e.target.files[0];
-    if (!file) return;
-    const reader = new FileReader();
-    reader.onloadend = () => {
-      const img = new Image();
-      img.onload = () => {
-        const canvas = document.createElement('canvas');
-        let { width, height } = img;
-        if (width > height) { if (width > 800) { height *= 800 / width; width = 800; } } else { if (height > 800) { width *= 800 / height; height = 800; } }
-        canvas.width = width; canvas.height = height;
-        const ctx = canvas.getContext('2d');
-        ctx.drawImage(img, 0, 0, width, height);
-        setPhoto(canvas.toDataURL('image/jpeg', 0.8));
-      };
-      img.src = reader.result;
-    };
-    reader.readAsDataURL(file);
-  };
+  const visibleProjects = useMemo(() => (
+    role === 'manager'
+      ? ALL_PROJECTS
+      : ALL_PROJECTS.filter(p => (projectAccess[p.id] || []).includes(userEmail))
+  ), [ALL_PROJECTS, projectAccess, role, userEmail]);
+
+  const visibleIdsKey = useMemo(
+    () => visibleProjects.map(p => p.id).sort().join('|'),
+    [visibleProjects]
+  );
+
+  const selectedProjectId = selectedProject?.id || null;
+  const selectedStageId = selectedStage?.id || null;
+
+  /* ---------------- Listener de itens, com escopo ---------------- */
+  useEffect(() => {
+    if (!user) { setItems([]); return; }
+    if (!cadastrosReady) return;
+
+    const visibleIds = visibleIdsKey ? visibleIdsKey.split('|') : [];
+    let q;
+
+    if (selectedProjectId) {
+      if (role !== 'manager' && !visibleIds.includes(selectedProjectId)) {
+        setItems([]); setItemsReady(true); return;
+      }
+      q = query(collection(db, collectionPath), where('projectId', '==', selectedProjectId));
+    } else if (role === 'manager') {
+      q = collection(db, collectionPath);
+    } else {
+      if (visibleIds.length === 0) { setItems([]); setItemsReady(true); return; }
+      q = query(collection(db, collectionPath), where('projectId', 'in', visibleIds.slice(0, IN_QUERY_LIMIT)));
+    }
+
+    setLoadingItems(true);
+    const unsub = onSnapshot(q, (snap) => {
+      setItems(
+        snap.docs
+          .map(d => ({ id: d.id, ...d.data() }))
+          .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))
+      );
+      setLoadingItems(false);
+      setItemsReady(true);
+    }, (err) => {
+      console.error('Erro ao carregar vistorias:', err);
+      setLoadingItems(false);
+      setItemsReady(true);
+    });
+
+    return () => unsub();
+  }, [user, role, selectedProjectId, visibleIdsKey, cadastrosReady]);
 
   useEffect(() => {
-    if (isMarking && canvasRef.current && photo) {
-      const canvas = canvasRef.current;
-      const ctx = canvas.getContext('2d');
-      const img = new Image();
-      img.onload = () => { canvas.width = img.width; canvas.height = img.height; ctx.drawImage(img, 0, 0); setDrawingHistory([canvas.toDataURL()]); };
-      img.src = photo;
+    setVisibleCount(PAGE_SIZE);
+  }, [selectedProjectId, selectedStageId, selectedLocation, statusFilter, pickedDisciplines]);
+
+  /* ---------------- Abertura ---------------- */
+  useEffect(() => {
+    if (booted || !user) return;
+    if (cadastrosReady && itemsReady) setBooted(true);
+  }, [booted, user, cadastrosReady, itemsReady]);
+
+  useEffect(() => {
+    if (booted || !user) return;
+    const slow = window.setTimeout(() => setSlowBoot(true), SLOW_BOOT_MS);
+    const giveUp = window.setTimeout(() => setBooted(true), BOOT_TIMEOUT_MS);
+    return () => { window.clearTimeout(slow); window.clearTimeout(giveUp); };
+  }, [booted, user]);
+
+  // Ao abrir, verifica se ficou um registro pela metade da sessão anterior.
+  useEffect(() => {
+    if (!booted) return;
+    const draft = readDraft();
+    if (draftHasContent(draft)) setPendingDraft(draft);
+  }, [booted]);
+
+  /* ---------------- Rascunho automático ----------------
+   * O Android encerra o app enquanto a câmera do sistema está aberta.
+   * Guardar o formulário em disco transforma isso num aborrecimento
+   * pequeno em vez de perder a vistoria inteira. */
+  useEffect(() => {
+    if (view !== 'form') return;
+    const timer = window.setTimeout(() => {
+      writeDraft({
+        formProject, formStage, formLocation,
+        description, discipline, photo,
+        editingId: editingItem ? editingItem.id : null,
+        savedAt: new Date().toISOString()
+      });
+    }, 600);
+    return () => window.clearTimeout(timer);
+  }, [view, formProject, formStage, formLocation, description, discipline, photo, editingItem]);
+
+  /* ---------------- Câmera dentro do app ----------------
+   * A câmera do sistema tira o app da tela, e é justamente aí que o
+   * Android o encerra por falta de memória. Capturando aqui dentro,
+   * o app nunca sai do primeiro plano. */
+  useEffect(() => {
+    if (!cameraOn) return;
+    let cancelled = false;
+    const videoEl = videoRef.current;
+
+    (async () => {
+      try {
+        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+          throw new Error('sem suporte');
+        }
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: {
+            facingMode: { ideal: 'environment' },
+            width: { ideal: 1920 },
+            height: { ideal: 1080 }
+          },
+          audio: false
+        });
+        if (cancelled) { stream.getTracks().forEach(t => t.stop()); return; }
+        streamRef.current = stream;
+        if (videoEl) {
+          videoEl.srcObject = stream;
+          try { await videoEl.play(); } catch (e) { /* autoplay */ }
+        }
+      } catch (e) {
+        if (!cancelled) {
+          setCameraError('Não consegui abrir a câmera aqui dentro. Use "Câmera do celular" ou "Galeria".');
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+      if (streamRef.current) {
+        streamRef.current.getTracks().forEach(t => t.stop());
+        streamRef.current = null;
+      }
+      if (videoEl) videoEl.srcObject = null;
+    };
+  }, [cameraOn]);
+
+  const shootPhoto = () => {
+    const video = videoRef.current;
+    if (!video || !video.videoWidth) return;
+    try {
+      const dataUrl = drawToDataUrl(video, video.videoWidth, video.videoHeight, PHOTO_MAX, PHOTO_QUALITY);
+      setPhoto(dataUrl);
+      setPhotoDirty(true);
+      setCameraOn(false);
+      setCameraError('');
+    } catch (e) {
+      setCameraError('Não foi possível capturar a imagem. Tente novamente.');
     }
+  };
+
+  const handleFilePicked = async (e) => {
+    const file = e.target.files[0];
+    e.target.value = '';
+    if (!file) return;
+    try {
+      const dataUrl = await fileToDataUrl(file, PHOTO_MAX, PHOTO_QUALITY);
+      setPhoto(dataUrl);
+      setPhotoDirty(true);
+      setCameraOn(false);
+    } catch (err) {
+      alert('Não foi possível ler a imagem. Tente novamente.');
+    }
+  };
+
+  /* ---------------- Foto em tamanho cheio ---------------- */
+  const loadFullPhoto = async (item) => {
+    if (isDataUrl(item.photoUrl)) return item.photoUrl;   // item antigo, ainda não migrado
+    const snap = await getDoc(doc(db, photosPath, item.id));
+    return snap.exists() ? snap.data().photoUrl : null;
+  };
+
+  const openPhoto = async (item) => {
+    setLightbox({ loading: true });
+    try {
+      const url = await loadFullPhoto(item);
+      setLightbox(url ? { url } : { error: true });
+    } catch (e) {
+      setLightbox({ error: true });
+    }
+  };
+
+  /* ---------------- Editor de marcação ---------------- */
+  useEffect(() => {
+    if (!isMarking || !canvasRef.current || !photo) return;
+    const canvas = canvasRef.current;
+    const ctx = canvas.getContext('2d');
+    const img = new Image();
+    img.onload = () => {
+      canvas.width = img.width;
+      canvas.height = img.height;
+      ctx.drawImage(img, 0, 0);
+      setDrawingHistory([canvas.toDataURL('image/jpeg', 0.92)]);
+    };
+    img.onerror = () => alert('Não foi possível abrir a foto para marcação.');
+    img.src = photo;
   }, [isMarking, photo]);
 
+  const getPos = (e) => {
+    const canvas = canvasRef.current;
+    const rect = canvas.getBoundingClientRect();
+    const scaleX = canvas.width / rect.width;
+    const scaleY = canvas.height / rect.height;
+    const point = (e.touches && e.touches[0]) || (e.changedTouches && e.changedTouches[0]) || e;
+    return { x: (point.clientX - rect.left) * scaleX, y: (point.clientY - rect.top) * scaleY };
+  };
+
+  const strokeWidth = () => {
+    const canvas = canvasRef.current;
+    return Math.max(3, Math.round((canvas ? canvas.width : 600) / 200));
+  };
+
   const startDrawing = (e) => {
-    const canvas = canvasRef.current; const rect = canvas.getBoundingClientRect(); const scaleX = canvas.width / rect.width; const scaleY = canvas.height / rect.height;
-    const x = (e.clientX || e.touches[0].clientX - rect.left) * scaleX; const y = (e.clientY || e.touches[0].clientY - rect.top) * scaleY;
-    setStartPos({ x, y }); setIsDrawing(true); setCurrentCanvasState(canvas.toDataURL());
-    if (drawMode === 'pencil') { const ctx = canvas.getContext('2d'); ctx.beginPath(); ctx.moveTo(x, y); }
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const { x, y } = getPos(e);
+    startPosRef.current = { x, y };
+    isDrawingRef.current = true;
+
+    const snap = document.createElement('canvas');
+    snap.width = canvas.width;
+    snap.height = canvas.height;
+    snap.getContext('2d').drawImage(canvas, 0, 0);
+    snapshotRef.current = snap;
+
+    if (drawMode === 'pencil') {
+      const ctx = canvas.getContext('2d');
+      ctx.beginPath();
+      ctx.moveTo(x, y);
+    }
   };
 
   const draw = (e) => {
-    if (!isDrawing) return;
-    const canvas = canvasRef.current; const ctx = canvas.getContext('2d'); const rect = canvas.getBoundingClientRect(); const scaleX = canvas.width / rect.width; const scaleY = canvas.height / rect.height;
-    const x = (e.clientX || e.touches[0].clientX - rect.left) * scaleX; const y = (e.clientY || e.touches[0].clientY - rect.top) * scaleY;
-    ctx.lineWidth = 4; ctx.strokeStyle = color; ctx.lineCap = 'round';
-    if (drawMode === 'pencil') { ctx.lineTo(x, y); ctx.stroke(); } else {
-      const img = new Image();
-      img.onload = () => {
-        ctx.clearRect(0, 0, canvas.width, canvas.height); ctx.drawImage(img, 0, 0); ctx.beginPath();
-        if (drawMode === 'circle') { const radius = Math.sqrt(Math.pow(x - startPos.x, 2) + Math.pow(y - startPos.y, 2)); ctx.arc(startPos.x, startPos.y, radius, 0, 2 * Math.PI); ctx.stroke(); } 
-        else if (drawMode === 'arrow') { const headlen = 15; const angle = Math.atan2(y - startPos.y, x - startPos.x); ctx.moveTo(startPos.x, startPos.y); ctx.lineTo(x, y); ctx.lineTo(x - headlen * Math.cos(angle - Math.PI / 6), y - headlen * Math.sin(angle - Math.PI / 6)); ctx.moveTo(x, y); ctx.lineTo(x - headlen * Math.cos(angle + Math.PI / 6), y - headlen * Math.sin(angle + Math.PI / 6)); ctx.stroke(); }
-      };
-      img.src = currentCanvasState;
+    if (!isDrawingRef.current) return;
+    const canvas = canvasRef.current;
+    const ctx = canvas.getContext('2d');
+    const { x, y } = getPos(e);
+    const start = startPosRef.current;
+
+    ctx.lineWidth = strokeWidth();
+    ctx.strokeStyle = color;
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+
+    if (drawMode === 'pencil') { ctx.lineTo(x, y); ctx.stroke(); return; }
+
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.drawImage(snapshotRef.current, 0, 0);
+    ctx.beginPath();
+
+    if (drawMode === 'circle') {
+      const radius = Math.hypot(x - start.x, y - start.y);
+      ctx.arc(start.x, start.y, radius, 0, 2 * Math.PI);
+      ctx.stroke();
+    } else if (drawMode === 'arrow') {
+      const headlen = Math.max(15, ctx.lineWidth * 4);
+      const angle = Math.atan2(y - start.y, x - start.x);
+      ctx.moveTo(start.x, start.y);
+      ctx.lineTo(x, y);
+      ctx.lineTo(x - headlen * Math.cos(angle - Math.PI / 6), y - headlen * Math.sin(angle - Math.PI / 6));
+      ctx.moveTo(x, y);
+      ctx.lineTo(x - headlen * Math.cos(angle + Math.PI / 6), y - headlen * Math.sin(angle + Math.PI / 6));
+      ctx.stroke();
     }
   };
 
-  const stopDrawing = () => { if (!isDrawing) return; setIsDrawing(false); setDrawingHistory([...drawingHistory, canvasRef.current.toDataURL()]); };
-  const saveMarkedPhoto = () => { setPhoto(canvasRef.current.toDataURL('image/jpeg', 0.8)); setIsMarking(false); };
+  const stopDrawing = () => {
+    if (!isDrawingRef.current) return;
+    isDrawingRef.current = false;
+    const snapshot = canvasRef.current.toDataURL('image/jpeg', 0.92);
+    setDrawingHistory(prev => {
+      const next = [...prev, snapshot];
+      return next.length > MAX_HISTORY ? next.slice(next.length - MAX_HISTORY) : next;
+    });
+  };
+
+  const undoDrawing = () => {
+    if (drawingHistory.length <= 1) return;
+    const newHist = drawingHistory.slice(0, -1);
+    setDrawingHistory(newHist);
+    const canvas = canvasRef.current;
+    const ctx = canvas.getContext('2d');
+    const img = new Image();
+    img.onload = () => {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.drawImage(img, 0, 0);
+    };
+    img.src = newHist[newHist.length - 1];
+  };
+
+  const saveMarkedPhoto = () => {
+    setPhoto(canvasRef.current.toDataURL('image/jpeg', PHOTO_QUALITY));
+    setPhotoDirty(true);
+    setIsMarking(false);
+  };
+
+  /* ---------------- CRUD ---------------- */
+  const resetForm = () => {
+    setEditingItem(null); setPhoto(null); setPhotoDirty(false);
+    setDescription(''); setDiscipline('');
+    setFormProject(''); setFormStage(''); setFormLocation('');
+    setLoadingPhoto(false);
+    clearDraft();
+  };
 
   const handleNewItem = () => {
-    setEditingId(null); setPhoto(null); setDescription(''); setDiscipline('');
+    resetForm();
     setFormProject(selectedProject?.id || '');
     setFormStage(selectedStage?.id || '');
     setFormLocation(selectedLocation || '');
     setView('form');
   };
 
-  const editItem = (item) => {
-    setEditingId(item.id); setPhoto(item.photoUrl); setDescription(item.description); setDiscipline(item.discipline);
+  const editItem = async (item) => {
+    setEditingItem(item);
+    setPhotoDirty(false);
+    setDescription(item.description || '');
+    setDiscipline(item.discipline || '');
     setFormProject(item.projectId !== 'NO_PROJECT' ? item.projectId : '');
     setFormStage(item.stageId !== 'NO_STAGE' ? item.stageId : '');
     setFormLocation(item.locationId !== 'Geral' ? item.locationId : '');
+    setPhoto(null);
+    setView('form');
+    setLoadingPhoto(true);
+    try {
+      const full = await loadFullPhoto(item);
+      setPhoto(full);
+    } catch (e) {
+      console.warn('Não foi possível carregar a foto do item.', e);
+    } finally {
+      setLoadingPhoto(false);
+    }
+  };
+
+  const restoreDraft = (draft) => {
+    setEditingItem(null);
+    setFormProject(draft.formProject || '');
+    setFormStage(draft.formStage || '');
+    setFormLocation(draft.formLocation || '');
+    setDescription(draft.description || '');
+    setDiscipline(draft.discipline || '');
+    setPhoto(draft.photo || null);
+    setPhotoDirty(!!draft.photo);
+    setPendingDraft(null);
     setView('form');
   };
 
-  const saveItem = async () => {
-    if (!photo || !description || !discipline || !formProject || !formStage || !formLocation) return alert("Preencha todos os campos e selecione a obra/etapa/local.");
-    try {
-      if (editingId) {
-        await updateDoc(doc(db, collectionPath, editingId), { 
-          photoUrl: photo, description, discipline,
-          projectId: formProject, stageId: formStage, locationId: formLocation
-        });
-      } else {
-        await addDoc(collection(db, collectionPath), {
-          projectId: formProject, stageId: formStage, locationId: formLocation,
-          photoUrl: photo, description, discipline, createdAt: new Date().toISOString(), managerApproved: false, partnerFixed: false, authorEmail: user.email
-        });
-      }
-      setView('list'); 
-      setEditingId(null); setPhoto(null); setDescription(''); setDiscipline('');
-      setFormProject(''); setFormStage(''); setFormLocation('');
-    } catch (e) { alert("Erro ao guardar item: " + e.message); }
+  const discardDraft = () => {
+    clearDraft();
+    setPendingDraft(null);
   };
 
-  const handleLogin = async (e) => { e.preventDefault(); try { await signInWithEmailAndPassword(auth, loginEmail, loginPassword); } catch (e) { alert("Credenciais inválidas."); } };
-  
-  if (loadingAuth) return <div className="flex items-center justify-center h-screen font-bold text-slate-500 bg-slate-50">Carregando VistoriaPRO...</div>;
+  const saveItem = async () => {
+    if (!photo || !description || !discipline || !formProject || !formStage || !formLocation) {
+      return alert('Preencha todos os campos e selecione a obra/etapa/local.');
+    }
+    setSaving(true);
+    try {
+      const changedPhoto = photoDirty || !editingItem;
+      let fullPhoto = null;
+      let thumb = null;
+      if (changedPhoto) {
+        fullPhoto = await fitDocumentLimit(photo);
+        thumb = await resizeToDataUrl(fullPhoto, THUMB_MAX, THUMB_QUALITY);
+      }
+
+      if (editingItem) {
+        const payload = {
+          description, discipline,
+          projectId: formProject, stageId: formStage, locationId: formLocation,
+          updatedAt: new Date().toISOString(),
+          updatedBy: userEmail
+        };
+        if (changedPhoto) {
+          payload.thumbUrl = thumb;
+          payload.photoUrl = deleteField();   // some do registro leve
+        }
+        await updateDoc(doc(db, collectionPath, editingItem.id), payload);
+        if (changedPhoto) {
+          await setDoc(doc(db, photosPath, editingItem.id), {
+            photoUrl: fullPhoto, updatedAt: new Date().toISOString()
+          });
+        }
+      } else {
+        const ref = await addDoc(collection(db, collectionPath), {
+          projectId: formProject, stageId: formStage, locationId: formLocation,
+          description, discipline,
+          thumbUrl: thumb,
+          createdAt: new Date().toISOString(),
+          authorEmail: userEmail,
+          managerApproved: false,
+          partnerFixed: false
+        });
+        await setDoc(doc(db, photosPath, ref.id), {
+          photoUrl: fullPhoto, createdAt: new Date().toISOString()
+        });
+      }
+
+      resetForm();
+      setView('list');
+    } catch (e) {
+      alert('Erro ao guardar item: ' + e.message);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const deleteItem = async (item) => {
+    if (!window.confirm('Apagar permanentemente?')) return;
+    try {
+      await deleteDoc(doc(db, collectionPath, item.id));
+      try { await deleteDoc(doc(db, photosPath, item.id)); } catch (e) { /* pode não existir */ }
+    } catch (e) {
+      alert('Erro ao apagar: ' + e.message);
+    }
+  };
+
+  const togglePartnerFixed = (item) => {
+    if (item.managerApproved) return;
+    const next = !item.partnerFixed;
+    updateDoc(doc(db, collectionPath, item.id), {
+      partnerFixed: next,
+      partnerFixedAt: next ? new Date().toISOString() : null,
+      partnerFixedBy: next ? userEmail : null
+    }).catch(e => alert('Erro ao atualizar: ' + e.message));
+  };
+
+  const toggleManagerApproved = (item) => {
+    if (role !== 'manager') return;
+    const next = !item.managerApproved;
+    updateDoc(doc(db, collectionPath, item.id), {
+      managerApproved: next,
+      managerApprovedAt: next ? new Date().toISOString() : null,
+      managerApprovedBy: next ? userEmail : null
+    }).catch(e => alert('Erro ao atualizar: ' + e.message));
+  };
+
+  /* ---------------- Exclusão em cascata ---------------- */
+  const deleteDocsInChunks = async (refs) => {
+    for (let i = 0; i < refs.length; i += 400) {
+      const batch = writeBatch(db);
+      refs.slice(i, i + 400).forEach(r => batch.delete(r));
+      await batch.commit();
+    }
+  };
+
+  const deleteProjectCascade = async (project) => {
+    if (!window.confirm(
+      `Excluir a obra "${project.name}"?\n\nIsto apaga também todas as etapas, locais e vistorias dela. Esta ação não pode ser desfeita.`
+    )) return;
+    try {
+      const [itemsSnap, stagesSnap, locsSnap] = await Promise.all([
+        getDocs(query(collection(db, collectionPath), where('projectId', '==', project.id))),
+        getDocs(query(collection(db, 'custom_stages'), where('projectId', '==', project.id))),
+        getDocs(query(collection(db, 'custom_locations'), where('projectId', '==', project.id)))
+      ]);
+      const refs = [
+        ...itemsSnap.docs.map(d => d.ref),
+        ...itemsSnap.docs.map(d => doc(db, photosPath, d.id)),
+        ...stagesSnap.docs.map(d => d.ref),
+        ...locsSnap.docs.map(d => d.ref),
+        doc(db, 'custom_projects', project.id),
+        doc(db, 'project_access', project.id)
+      ];
+      await deleteDocsInChunks(refs);
+      if (selectedProjectId === project.id) {
+        setSelectedProject(null); setSelectedStage(null); setSelectedLocation(null);
+      }
+    } catch (e) {
+      alert('Erro ao excluir a obra: ' + e.message);
+    }
+  };
+
+  const deleteStageCascade = async (stage) => {
+    if (!window.confirm(`Excluir a etapa "${stage.name}"?\n\nIsto apaga também os locais e as vistorias dela.`)) return;
+    try {
+      const [itemsSnap, locsSnap] = await Promise.all([
+        getDocs(query(collection(db, collectionPath), where('stageId', '==', stage.id))),
+        getDocs(query(collection(db, 'custom_locations'), where('stageId', '==', stage.id)))
+      ]);
+      const refs = [
+        ...itemsSnap.docs.map(d => d.ref),
+        ...itemsSnap.docs.map(d => doc(db, photosPath, d.id)),
+        ...locsSnap.docs.map(d => d.ref),
+        doc(db, 'custom_stages', stage.id)
+      ];
+      await deleteDocsInChunks(refs);
+      if (selectedStageId === stage.id) { setSelectedStage(null); setSelectedLocation(null); }
+    } catch (e) {
+      alert('Erro ao excluir a etapa: ' + e.message);
+    }
+  };
+
+  /* ---------------- Otimização das vistorias antigas ----------------
+   * Tira a foto de dentro do registro e deixa só a miniatura. Roda em
+   * blocos pequenos, é interrompível e pode ser repetida sem risco:
+   * cada passagem só toca no que ainda não foi convertido. */
+  const runPhotoMigration = async () => {
+    if (role !== 'manager') return;
+    if (!window.confirm(
+      'Otimizar as fotos das vistorias antigas?\n\nO app vai passar por todos os registros, guardar a foto em um documento separado e deixar só uma miniatura na listagem. Isso deixa o app muito mais leve no celular.\n\nPode ser interrompido e retomado a qualquer momento. Recomendado fazer pelo computador.'
+    )) return;
+
+    setMigration({ done: 0, converted: 0, running: true });
+    let cursor = null;
+    let seen = 0;
+    let converted = 0;
+
+    try {
+      for (;;) {
+        const parts = [collection(db, collectionPath), orderBy(documentId()), limit(MIGRATION_CHUNK)];
+        if (cursor) parts.push(startAfter(cursor));
+        const snap = await getDocs(query(...parts));
+        if (snap.empty) break;
+        cursor = snap.docs[snap.docs.length - 1];
+
+        for (const d of snap.docs) {
+          seen++;
+          const data = d.data();
+          if (!isDataUrl(data.photoUrl)) continue;   // já convertido
+          const thumb = await resizeToDataUrl(data.photoUrl, THUMB_MAX, THUMB_QUALITY);
+          await setDoc(doc(db, photosPath, d.id), {
+            photoUrl: data.photoUrl, migratedAt: new Date().toISOString()
+          });
+          await updateDoc(d.ref, { thumbUrl: thumb, photoUrl: deleteField() });
+          converted++;
+          setMigration({ done: seen, converted, running: true });
+        }
+        setMigration({ done: seen, converted, running: true });
+        if (snap.size < MIGRATION_CHUNK) break;
+      }
+      setMigration({ done: seen, converted, running: false });
+    } catch (e) {
+      setMigration({ done: seen, converted, running: false, error: e.message });
+    }
+  };
+
+  /* ---------------- Login ---------------- */
+  const handleLogin = async (e) => {
+    e.preventDefault();
+    try { await signInWithEmailAndPassword(auth, loginEmail.trim(), loginPassword); }
+    catch (err) { alert('Credenciais inválidas.'); }
+  };
+
+  const splash = (message) => (
+    <div className="splash">
+      <div className="splash-inner">
+        <img className="splash-logo" src={LOGO_URL} alt="Deville"
+          onError={(e) => { e.currentTarget.style.display = 'none'; }} />
+        <h1 className="splash-title">Vistoria<span>PRO</span></h1>
+        <p className="splash-sub">Gestão de Checklists Deville</p>
+        <div className="splash-bar"><i /></div>
+        <p className="splash-status">{message}</p>
+      </div>
+      <p className="splash-credit">Desenvolvido por PHRM</p>
+    </div>
+  );
+
+  if (loadingAuth) return splash('Conectando...');
+
   if (!user) return (
-    <div className="flex items-center justify-center min-h-screen bg-slate-100 p-5">
-      <div className="bg-white p-10 rounded-2xl shadow-xl w-full max-w-md text-center animate-[fadeIn_0.3s_ease-out_forwards]">
-        <div className="text-indigo-600 mb-4 inline-block"><Building2 size={48} /></div>
-        <h1 className="text-3xl font-black text-blue-900 tracking-tight">Vistoria<span className="text-indigo-500">PRO</span></h1>
-        <p className="text-slate-500 text-sm mb-8">Gestão de Checklists Deville</p>
-        <form className="flex flex-col gap-4" onSubmit={handleLogin}>
-          <input type="email" placeholder="E-mail" className="p-3 border border-slate-300 rounded-lg text-base outline-none bg-slate-50 focus:border-indigo-600 focus:bg-white focus:ring-2 focus:ring-indigo-100" value={loginEmail} onChange={e => setLoginEmail(e.target.value)} required />
-          <input type="password" placeholder="Senha" className="p-3 border border-slate-300 rounded-lg text-base outline-none bg-slate-50 focus:border-indigo-600 focus:bg-white focus:ring-2 focus:ring-indigo-100" value={loginPassword} onChange={e => setLoginPassword(e.target.value)} required />
-          <button type="submit" className="w-full bg-indigo-600 text-white rounded-xl font-bold p-4 border-none cursor-pointer transition-transform hover:scale-95 shadow-md mt-2">Entrar no Sistema</button>
+    <div className="login-container">
+      <div className="login-card fade-in">
+        <div className="login-icon"><Building2 size={48} /></div>
+        <h1 className="login-title">Vistoria<span>PRO</span></h1>
+        <p className="login-subtitle">Gestão de Checklists Deville</p>
+        <form className="login-form" onSubmit={handleLogin}>
+          <input type="email" placeholder="E-mail" className="login-input" value={loginEmail} onChange={e => setLoginEmail(e.target.value)} required />
+          <input type="password" placeholder="Senha" className="login-input" value={loginPassword} onChange={e => setLoginPassword(e.target.value)} required />
+          <button type="submit" className="btn-primary" style={{ marginTop: '10px' }}>Entrar no Sistema</button>
         </form>
       </div>
     </div>
   );
 
+  if (!booted) {
+    return splash(slowBoot ? 'Conexão lenta. Ainda carregando as vistorias...' : 'Carregando vistorias...');
+  }
+
+  /* ---------------- Telas ---------------- */
   const renderSettings = () => (
-    <div className="p-4 flex flex-col gap-5 animate-[fadeIn_0.3s_ease-out_forwards]">
-      <h2 className="text-xl font-bold text-slate-800 border-b border-slate-200 pb-2">Configurações de Acesso</h2>
-      <p className="text-slate-500 text-sm mb-0">Selecione uma obra para adicionar os fornecedores autorizados.</p>
-      <div className="flex flex-col gap-1.5 mt-4">
-        <select className="p-3 border border-slate-300 rounded-lg outline-none text-base bg-white focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100" value={configProject?.id || ''} onChange={(e) => setConfigProject(ALL_PROJECTS.find(p => p.id === e.target.value))}>
+    <div className="page-container fade-in">
+      <h2 className="section-title">Configurações de Acesso</h2>
+      <p className="text-muted mb-0" style={{ fontSize: '14px' }}>Selecione uma obra para adicionar os fornecedores autorizados.</p>
+      <div className="form-group" style={{ marginTop: '16px' }}>
+        <select className="form-input" value={configProject?.id || ''} onChange={(e) => setConfigProject(ALL_PROJECTS.find(p => p.id === e.target.value) || null)}>
           <option value="">Selecione a Obra...</option>
           {ALL_PROJECTS.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
         </select>
       </div>
       {configProject && (
-        <div className="bg-white p-4 rounded-xl border border-slate-200 mt-2 shadow-sm">
-          <h3 className="text-base font-bold mb-4 text-slate-800">Fornecedores: {configProject.name}</h3>
-          <div className="flex gap-2 mb-4">
-            <input type="email" placeholder="E-mail do fornecedor" className="flex-1 p-2.5 border border-slate-300 rounded-lg outline-none bg-white focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100" value={newPartnerEmail} onChange={(e) => setNewPartnerEmail(e.target.value)} />
-            <button className="bg-indigo-600 text-white px-4 rounded-lg font-bold hover:scale-95 transition-transform" onClick={async () => {
-              if(!newPartnerEmail) return;
+        <div className="settings-card">
+          <h3 className="settings-card-title">Fornecedores: {configProject.name}</h3>
+          <div style={{ display: 'flex', gap: '8px', marginBottom: '16px' }}>
+            <input type="email" placeholder="E-mail do fornecedor" className="form-input"
+              style={{ flex: 1, padding: '10px' }}
+              value={newPartnerEmail} onChange={(e) => setNewPartnerEmail(e.target.value)} />
+            <button className="btn-primary btn-inline" onClick={async () => {
               const email = newPartnerEmail.toLowerCase().trim();
+              if (!email) return;
               const currentList = projectAccess[configProject.id] || [];
-              if(!currentList.includes(email)) { await setDoc(doc(db, 'project_access', configProject.id), { authorizedEmails: [...currentList, email] }); setNewPartnerEmail(''); }
+              if (currentList.includes(email)) { setNewPartnerEmail(''); return; }
+              try {
+                await setDoc(doc(db, 'project_access', configProject.id), { authorizedEmails: [...currentList, email] });
+                setNewPartnerEmail('');
+              } catch (e) { alert('Erro ao adicionar: ' + e.message); }
             }}>Adicionar</button>
           </div>
-          <div className="flex flex-col gap-2">
-            {(projectAccess[configProject.id] || []).length === 0 ? <p className="text-slate-400 text-sm">Nenhum fornecedor cadastrado.</p> : 
-              (projectAccess[configProject.id] || []).map(email => (
-                <div key={email} className="flex justify-between items-center p-3 bg-slate-50 rounded-lg border border-slate-200">
-                  <span className="text-sm font-semibold">{email}</span>
-                  <button onClick={async () => await setDoc(doc(db, 'project_access', configProject.id), { authorizedEmails: projectAccess[configProject.id].filter(e => e !== email) })} className="text-red-500 hover:text-red-700 bg-transparent border-none"><X size={18}/></button>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+            {(projectAccess[configProject.id] || []).length === 0
+              ? <p className="text-muted" style={{ fontSize: '14px' }}>Nenhum fornecedor cadastrado.</p>
+              : (projectAccess[configProject.id] || []).map(email => (
+                <div key={email} className="access-row">
+                  <span style={{ fontSize: '14px', fontWeight: 600 }}>{email}</span>
+                  <button onClick={async () => {
+                    try {
+                      await setDoc(doc(db, 'project_access', configProject.id), {
+                        authorizedEmails: projectAccess[configProject.id].filter(e => e !== email)
+                      });
+                    } catch (e) { alert('Erro ao remover: ' + e.message); }
+                  }} className="btn-delete"><X size={18} /></button>
                 </div>
               ))
             }
           </div>
         </div>
       )}
+
+      <div className="settings-card">
+        <h3 className="settings-card-title">Manutenção</h3>
+        <p className="text-muted" style={{ fontSize: '13px', marginBottom: '14px' }}>
+          Tira as fotos de dentro dos registros de vistoria e deixa só uma miniatura na
+          listagem. É o que faz o app deixar de travar em obras com muitos itens.
+          Pode interromper e retomar quando quiser.
+        </p>
+        <button className="btn-primary" onClick={runPhotoMigration} disabled={migration?.running}>
+          {migration?.running ? 'Otimizando...' : 'Otimizar fotos antigas'}
+        </button>
+        {migration && (
+          <p className="text-muted" style={{ fontSize: '13px', marginTop: '12px' }}>
+            {migration.error
+              ? `Interrompido: ${migration.error}`
+              : `${migration.done} registros verificados · ${migration.converted} otimizados${migration.running ? '...' : '. Concluído.'}`}
+          </p>
+        )}
+      </div>
     </div>
   );
 
+  const toggleDiscipline = (d) => {
+    setPickedDisciplines(prev => prev.includes(d) ? prev.filter(x => x !== d) : [...prev, d]);
+  };
+
   const renderList = () => {
-    let filteredItems = items;
-    
+    const allowedIds = visibleProjects.map(p => p.id);
+    let filteredItems = role === 'manager' ? items : items.filter(i => allowedIds.includes(i.projectId));
+
     if (selectedProject) filteredItems = filteredItems.filter(i => i.projectId === selectedProject.id);
     if (selectedStage) filteredItems = filteredItems.filter(i => i.stageId === selectedStage.id);
     if (selectedLocation) filteredItems = filteredItems.filter(i => i.locationId === selectedLocation);
     if (statusFilter === 'pending') filteredItems = filteredItems.filter(i => !i.managerApproved);
     if (statusFilter === 'completed') filteredItems = filteredItems.filter(i => i.managerApproved);
-    if (disciplineFilter !== 'all') filteredItems = filteredItems.filter(i => i.discipline === disciplineFilter);
+    if (pickedDisciplines.length > 0) filteredItems = filteredItems.filter(i => pickedDisciplines.includes(i.discipline));
 
-    const availableStages = selectedProject ? [...(STAGES[selectedProject.id] || []), ...customStages.filter(s => s.projectId === selectedProject.id)] : [];
+    const availableStages = selectedProject
+      ? [...(STAGES[selectedProject.id] || []), ...customStages.filter(s => s.projectId === selectedProject.id)]
+      : [];
+
+    const doneCount = filteredItems.filter(i => i.managerApproved).length;
+    const shownItems = filteredItems.slice(0, visibleCount);
+    const remaining = filteredItems.length - shownItems.length;
+
+    const handlePrint = () => {
+      if (filteredItems.length > PRINT_WARN_AT && !window.confirm(
+        `Este relatório tem ${filteredItems.length} itens. Montar tudo de uma vez pode travar o celular.\n\nRecomendado: filtre por local, etapa ou disciplina antes de gerar o PDF.\n\nDeseja continuar mesmo assim?`
+      )) return;
+      if (remaining > 0) {
+        setVisibleCount(filteredItems.length);
+        window.setTimeout(() => window.print(), 500);
+      } else {
+        window.print();
+      }
+    };
 
     return (
-      <div className="p-4 flex flex-col gap-5 animate-[fadeIn_0.3s_ease-out_forwards]">
-        <div className="print:hidden flex justify-between items-center mb-2">
-          <h2 className="text-xl font-bold text-slate-800 m-0 border-none pb-0">{selectedLocation ? `Itens: ${selectedLocation}` : 'Checklist Geral'}</h2>
-          <button onClick={() => window.print()} className="flex items-center gap-1 bg-indigo-50 text-indigo-600 px-3 py-1.5 rounded-lg font-semibold text-sm hover:bg-indigo-100 transition-colors"><Printer size={16}/> PDF</button>
+      <div className="page-container fade-in">
+        <div className="hide-screen print-header">
+          <h1>VistoriaPRO — Relatório de Vistoria</h1>
+          <p>
+            <strong>Obra:</strong> {selectedProject?.name || 'Todas as obras'} &nbsp;·&nbsp;
+            <strong>Etapa:</strong> {selectedStage?.name || 'Todas'} &nbsp;·&nbsp;
+            <strong>Local:</strong> {selectedLocation || 'Todos'}
+          </p>
+          <p>
+            <strong>Disciplinas:</strong>{' '}
+            {pickedDisciplines.length > 0 ? pickedDisciplines.join(', ') : 'Todas'}
+          </p>
+          <p>
+            <strong>Emitido em:</strong> {new Date().toLocaleString('pt-BR')} &nbsp;·&nbsp;
+            <strong>Itens:</strong> {filteredItems.length} &nbsp;·&nbsp;
+            <strong>Concluídos:</strong> {doneCount} &nbsp;·&nbsp;
+            <strong>Pendentes:</strong> {filteredItems.length - doneCount}
+          </p>
         </div>
 
-        <div className="print:hidden bg-slate-100 p-3 rounded-xl">
-          <div className="text-sm font-semibold text-slate-600 flex items-center gap-2 mb-2"><Filter size={16} /> Buscar Vistorias</div>
-          <div className="flex flex-col gap-2">
+        <div className="hide-print list-header" style={{ marginBottom: '8px' }}>
+          <h2 className="section-title mb-0">{selectedLocation ? `Itens: ${selectedLocation}` : 'Checklist Geral'}</h2>
+          <button onClick={handlePrint} className="btn-secondary"><Printer size={16} /> PDF</button>
+        </div>
+
+        <div className="filter-panel hide-print">
+          <div className="filter-title"><Filter size={16} /> Buscar Vistorias</div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
             {!selectedLocation && (
-              <div className="flex gap-2">
-                <select className="flex-1 p-2 rounded-lg border border-slate-300 text-sm bg-white" value={selectedProject?.id || 'all'} onChange={e => {
+              <div style={{ display: 'flex', gap: '8px' }}>
+                <select style={{ flex: 1 }} value={selectedProject?.id || 'all'} onChange={e => {
                   const p = ALL_PROJECTS.find(x => x.id === e.target.value);
                   setSelectedProject(p || null); setSelectedStage(null); setSelectedLocation(null);
                 }}>
                   <option value="all">Todas as Obras</option>
                   {visibleProjects.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
                 </select>
-
-                <select className="flex-1 p-2 rounded-lg border border-slate-300 text-sm bg-white" value={selectedStage?.id || 'all'} onChange={e => {
+                <select style={{ flex: 1 }} value={selectedStage?.id || 'all'} onChange={e => {
                   const s = availableStages.find(x => x.id === e.target.value);
                   setSelectedStage(s || null); setSelectedLocation(null);
                 }} disabled={!selectedProject}>
@@ -320,59 +1029,94 @@ export default function App() {
                 </select>
               </div>
             )}
-            <div className="flex gap-2">
-              <select className="flex-1 p-2 rounded-lg border border-slate-300 text-sm bg-white" value={statusFilter} onChange={e => setStatusFilter(e.target.value)}>
-                <option value="all">Todos os Status</option>
-                <option value="pending">Em Andamento</option>
-                <option value="completed">Concluídos</option>
-              </select>
-              <select className="flex-1 p-2 rounded-lg border border-slate-300 text-sm bg-white" value={disciplineFilter} onChange={e => setDisciplineFilter(e.target.value)}>
-                <option value="all">Todas as Disciplinas</option>
-                {DISCIPLINES.map(d => <option key={d} value={d}>{d}</option>)}
-              </select>
+
+            <select value={statusFilter} onChange={e => setStatusFilter(e.target.value)}>
+              <option value="all">Todos os Status</option>
+              <option value="pending">Em Andamento</option>
+              <option value="completed">Concluídos</option>
+            </select>
+
+            <div>
+              <div className="filter-subtitle">
+                Disciplinas
+                <span>{pickedDisciplines.length === 0 ? 'todas' : `${pickedDisciplines.length} selecionada${pickedDisciplines.length > 1 ? 's' : ''}`}</span>
+              </div>
+              <div className="chip-row">
+                <button
+                  type="button"
+                  className={`chip-toggle ${pickedDisciplines.length === 0 ? 'on' : ''}`}
+                  onClick={() => setPickedDisciplines([])}
+                >Todas</button>
+                {DISCIPLINES.map(d => (
+                  <button
+                    key={d}
+                    type="button"
+                    className={`chip-toggle ${pickedDisciplines.includes(d) ? 'on' : ''}`}
+                    onClick={() => toggleDiscipline(d)}
+                  >{d}</button>
+                ))}
+              </div>
             </div>
           </div>
         </div>
 
-        <div className="flex flex-col gap-4 flex-1">
-          {filteredItems.length === 0 ? <p className="text-center text-slate-400 py-10">Nenhum registro encontrado.</p> : 
-            filteredItems.map(item => (
-              <div key={item.id} className={`flex gap-4 bg-white p-4 rounded-xl border ${item.managerApproved ? 'border-emerald-300 bg-emerald-50' : 'border-slate-200'} shadow-sm break-inside-avoid print:border-none print:border-b print:border-slate-300 print:shadow-none print:py-2`}>
-                <div className="w-24 h-24 bg-slate-100 rounded-lg border border-slate-200 overflow-hidden flex items-center justify-center shrink-0">
-                  <img src={item.photoUrl} alt="Vistoria" className="w-full h-full object-cover" />
-                </div>
-                <div className="flex-1 flex flex-col justify-between">
-                  <div className="flex justify-between items-start mb-1">
-                    <span className="bg-indigo-100 text-indigo-800 text-xs font-bold py-0.5 px-2 rounded-md">{item.discipline}</span>
-                    {role === 'manager' && !item.managerApproved && (
-                      <div className="print:hidden flex gap-2">
-                        <button onClick={() => editItem(item)} className="text-slate-500 hover:text-indigo-600"><Pencil size={16}/></button>
-                        <button onClick={() => window.confirm("Apagar permanentemente?") && deleteDoc(doc(db, collectionPath, item.id))} className="text-red-400 hover:text-red-600"><Trash2 size={16}/></button>
-                      </div>
-                    )}
-                  </div>
-                  <p className="text-sm font-medium text-slate-800 leading-snug line-clamp-2 overflow-hidden print:line-clamp-none">{item.description}</p>
-                  
-                  {!selectedLocation && (
-                    <p className="text-[11px] text-slate-500 mt-0.5 mb-2">
-                      <strong>Obra:</strong> {ALL_PROJECTS.find(p => p.id === item.projectId)?.name || 'N/A'}<br/>
-                      <strong>Local:</strong> {item.locationId}
-                    </p>
-                  )}
+        <div className="checklist">
+          {loadingItems && items.length === 0
+            ? <p className="empty-state">Carregando vistorias...</p>
+            : filteredItems.length === 0
+              ? <p className="empty-state">Nenhum registro encontrado.</p>
+              : shownItems.map(item => (
+                <div key={item.id} className={`checklist-item ${item.managerApproved ? 'approved' : ''}`}>
+                  <button className="item-thumbnail" onClick={() => openPhoto(item)} title="Ampliar foto">
+                    {(item.thumbUrl || item.photoUrl)
+                      ? <img src={item.thumbUrl || item.photoUrl} alt="Vistoria" loading="lazy" decoding="async" />
+                      : <ImageIcon size={24} color="#94a3b8" />}
+                  </button>
+                  <div className="item-content">
+                    <div className="item-header-row">
+                      <span className="tag-discipline">{item.discipline}</span>
+                      {role === 'manager' && !item.managerApproved && (
+                        <div className="item-actions-top hide-print">
+                          <button onClick={() => editItem(item)} className="btn-edit"><Pencil size={16} /></button>
+                          <button onClick={() => deleteItem(item)} className="btn-delete"><Trash2 size={16} /></button>
+                        </div>
+                      )}
+                    </div>
+                    <p className="item-desc">{item.description}</p>
 
-                  <div className="print:hidden flex gap-4 mt-3 pt-3 border-t border-slate-200">
-                    <button onClick={() => !item.managerApproved && updateDoc(doc(db, collectionPath, item.id), { partnerFixed: !item.partnerFixed })} disabled={item.managerApproved} className={`flex items-center gap-1.5 text-sm font-semibold transition-colors ${item.managerApproved ? 'opacity-50 cursor-not-allowed' : ''} ${item.partnerFixed ? 'text-amber-600' : 'text-slate-400'}`}>
-                      {item.partnerFixed ? <CheckCircle size={16}/> : <Circle size={16}/>} Parceiro
-                    </button>
-                    <button onClick={() => role === 'manager' && updateDoc(doc(db, collectionPath, item.id), { managerApproved: !item.managerApproved })} disabled={role !== 'manager'} className={`flex items-center gap-1.5 text-sm font-semibold transition-colors ${role !== 'manager' ? 'opacity-50 cursor-not-allowed' : ''} ${item.managerApproved ? 'text-emerald-600' : 'text-slate-400'}`}>
-                      {item.managerApproved ? <CheckCircle size={16}/> : <Circle size={16}/>} OK Gerente
-                    </button>
+                    {!selectedLocation && (
+                      <p className="item-meta">
+                        <strong>Obra:</strong> {ALL_PROJECTS.find(p => p.id === item.projectId)?.name || 'N/A'}<br />
+                        <strong>Local:</strong> {item.locationId}
+                      </p>
+                    )}
+
+                    <span className={`hide-screen print-status ${item.managerApproved ? 'ok' : 'pend'}`}>
+                      {item.managerApproved ? 'CONCLUÍDO' : (item.partnerFixed ? 'AGUARDANDO APROVAÇÃO DO GERENTE' : 'PENDENTE')}
+                    </span>
+
+                    <div className="item-status-row hide-print">
+                      <button onClick={() => togglePartnerFixed(item)} disabled={item.managerApproved}
+                        className={`check-btn ${item.partnerFixed ? 'checked-partner' : ''}`}>
+                        {item.partnerFixed ? <CheckCircle size={16} /> : <Circle size={16} />} Parceiro
+                      </button>
+                      <button onClick={() => toggleManagerApproved(item)} disabled={role !== 'manager'}
+                        className={`check-btn ${item.managerApproved ? 'checked-manager' : ''}`}>
+                        {item.managerApproved ? <CheckCircle size={16} /> : <Circle size={16} />} OK Gerente
+                      </button>
+                    </div>
                   </div>
                 </div>
-              </div>
-            ))
+              ))
           }
         </div>
+
+        {remaining > 0 && (
+          <button className="btn-load-more hide-print" onClick={() => setVisibleCount(c => c + PAGE_SIZE)}>
+            Mostrar mais {Math.min(PAGE_SIZE, remaining)}
+            <span> · restam {remaining}</span>
+          </button>
+        )}
       </div>
     );
   };
@@ -386,140 +1130,242 @@ export default function App() {
     else if (view === 'settings') setView('dashboard');
   };
 
+  const goTo = (nextView) => {
+    setView(nextView);
+    setSelectedProject(null); setSelectedStage(null); setSelectedLocation(null);
+  };
+
+  const approvedCount = items.filter(i => i.managerApproved).length;
+
   return (
-    <div className="min-h-screen pb-[80px] bg-slate-50 text-slate-900 font-sans print:pb-0 print:bg-white">
-      {/* Editor de Marcação de Fotos */}
-      {isMarking && (
-        <div className="fixed inset-0 bg-slate-800 z-50 flex flex-col">
-          <div className="flex justify-between items-center p-4 bg-slate-900 text-white">
-            <button onClick={() => setIsMarking(false)} className="flex items-center gap-1 font-semibold text-sm hover:text-indigo-300"><ArrowLeft size={18}/> Voltar</button>
-            <button onClick={saveMarkedPhoto} className="bg-indigo-600 text-white font-bold px-4 py-2 rounded-lg text-sm hover:bg-indigo-500">Salvar Marcação</button>
+    <div className="app-layout">
+      {lightbox && (
+        <div className="lightbox" onClick={() => setLightbox(null)}>
+          <button className="lightbox-close"><X size={24} /></button>
+          {lightbox.loading && <p className="lightbox-msg">Carregando foto...</p>}
+          {lightbox.error && <p className="lightbox-msg">Não foi possível carregar a foto.</p>}
+          {lightbox.url && <img src={lightbox.url} alt="Foto da vistoria" />}
+        </div>
+      )}
+
+      {cameraOn && (
+        <div className="camera-modal">
+          <div className="camera-header">
+            <button onClick={() => { setCameraOn(false); setCameraError(''); }} className="btn-secondary" style={{ background: 'transparent', color: 'white' }}>
+              <ArrowLeft size={18} /> Voltar
+            </button>
+            <span className="camera-hint">Câmera do app</span>
           </div>
-          <div className="flex-1 bg-black flex items-center justify-center overflow-hidden">
-            <canvas ref={canvasRef} className="max-w-full max-h-full touch-none" onMouseDown={startDrawing} onMouseMove={draw} onMouseUp={stopDrawing} onMouseOut={stopDrawing} onTouchStart={startDrawing} onTouchMove={draw} onTouchEnd={stopDrawing} />
+
+          <div className="camera-stage">
+            <video ref={videoRef} playsInline muted autoPlay />
+            {cameraError && <p className="camera-error">{cameraError}</p>}
           </div>
-          <div className="bg-slate-900 p-4 flex justify-between items-center text-white">
-            <div className="flex gap-2">
-              <button className={`p-2 rounded-lg ${drawMode === 'pencil' ? 'bg-slate-700' : ''}`} onClick={() => setDrawMode('pencil')}><Pencil size={20}/></button>
-              <button className={`p-2 rounded-lg ${drawMode === 'arrow' ? 'bg-slate-700' : ''}`} onClick={() => setDrawMode('arrow')}><MousePointer2 size={20}/></button>
-              <button className={`p-2 rounded-lg ${drawMode === 'circle' ? 'bg-slate-700' : ''}`} onClick={() => setDrawMode('circle')}><Circle size={20}/></button>
-            </div>
-            <div className="flex gap-2">
-              {COLORS.map(c => <button key={c} className={`w-8 h-8 rounded-full border-2 ${color === c ? 'border-white' : 'border-transparent'}`} style={{backgroundColor: c}} onClick={() => setColor(c)} />)}
-            </div>
-            <button onClick={() => {
-              if (drawingHistory.length > 1) {
-                const newHist = drawingHistory.slice(0, -1); setDrawingHistory(newHist);
-                const img = new Image(); img.onload = () => { canvasRef.current.getContext('2d').clearRect(0,0,canvasRef.current.width,canvasRef.current.height); canvasRef.current.getContext('2d').drawImage(img,0,0); }; img.src = newHist[newHist.length-1];
-              }
-            }} disabled={drawingHistory.length <= 1} className="p-2 rounded-lg disabled:opacity-50"><Undo size={20}/></button>
+
+          <div className="camera-tools">
+            <button className="camera-alt" onClick={() => galleryInputRef.current && galleryInputRef.current.click()}>
+              <ImageIcon size={22} /><span>Galeria</span>
+            </button>
+            <button className="camera-shutter" onClick={shootPhoto} disabled={!!cameraError} aria-label="Tirar foto" />
+            <button className="camera-alt" onClick={() => systemCameraInputRef.current && systemCameraInputRef.current.click()}>
+              <Camera size={22} /><span>Câmera do celular</span>
+            </button>
           </div>
         </div>
       )}
 
-      {/* Header Principal */}
-      <header className="print:hidden bg-white border-b border-slate-200 p-4 flex justify-between items-center sticky top-0 z-10 shadow-sm">
-        <div className="flex items-center gap-3">
-          {view !== 'dashboard' && view !== 'projects' && !isMarking && <button onClick={handleBack} className="p-1 text-slate-500 rounded-full hover:bg-slate-100 hover:text-slate-900"><ArrowLeft size={20}/></button>}
-          <h1 className="text-xl font-black text-blue-900 tracking-tight">Vistoria<span className="text-indigo-500">PRO</span></h1>
-        </div>
-        <div className="flex items-center gap-3">
-          <div className="flex flex-col items-end">
-            <span className="text-xs font-bold text-slate-700">{user.email.split('@')[0]}</span>
-            <span className={`text-[10px] font-extrabold uppercase px-1.5 py-0.5 rounded ${role === 'manager' ? 'bg-blue-100 text-blue-800' : 'bg-amber-100 text-amber-800'}`}>{role === 'manager' ? 'Gerente' : 'Parceiro'}</span>
+      {isMarking && (
+        <div className="markup-modal">
+          <div className="markup-header">
+            <button onClick={() => setIsMarking(false)} className="btn-secondary" style={{ background: 'transparent', color: 'white' }}>
+              <ArrowLeft size={18} /> Voltar
+            </button>
+            <button onClick={saveMarkedPhoto} className="btn-primary btn-inline">Salvar Marcação</button>
           </div>
-          <button onClick={() => signOut(auth)} className="text-red-500 p-1.5 rounded-lg hover:bg-red-50 transition-colors" title="Sair"><LogOut size={20}/></button>
+          <div className="canvas-container">
+            <canvas ref={canvasRef}
+              onMouseDown={startDrawing} onMouseMove={draw} onMouseUp={stopDrawing} onMouseLeave={stopDrawing}
+              onTouchStart={startDrawing} onTouchMove={draw} onTouchEnd={stopDrawing} onTouchCancel={stopDrawing} />
+          </div>
+          <div className="markup-tools">
+            <div className="tool-group">
+              <button className={`tool-btn ${drawMode === 'pencil' ? 'active' : ''}`} onClick={() => setDrawMode('pencil')}><Pencil size={20} /></button>
+              <button className={`tool-btn ${drawMode === 'arrow' ? 'active' : ''}`} onClick={() => setDrawMode('arrow')}><MousePointer2 size={20} /></button>
+              <button className={`tool-btn ${drawMode === 'circle' ? 'active' : ''}`} onClick={() => setDrawMode('circle')}><Circle size={20} /></button>
+            </div>
+            <div className="tool-group">
+              {COLORS.map(c => (
+                <button key={c} className={`color-btn ${color === c ? 'active' : ''}`} style={{ backgroundColor: c }} onClick={() => setColor(c)} />
+              ))}
+            </div>
+            <button onClick={undoDrawing} disabled={drawingHistory.length <= 1} className="tool-btn"><Undo size={20} /></button>
+          </div>
+        </div>
+      )}
+
+      {/* inputs de arquivo: ficam fora da câmera para continuarem válidos */}
+      <input ref={galleryInputRef} type="file" accept="image/*" onChange={handleFilePicked} style={{ display: 'none' }} />
+      <input ref={systemCameraInputRef} type="file" accept="image/*" capture="environment" onChange={handleFilePicked} style={{ display: 'none' }} />
+
+      <header className="app-header hide-print">
+        <div className="header-left">
+          {view !== 'dashboard' && view !== 'projects' && !isMarking && (
+            <button onClick={handleBack} className="back-btn"><ArrowLeft size={20} /></button>
+          )}
+          <h1 className="app-title">Vistoria<span>PRO</span></h1>
+        </div>
+        <div className="header-right">
+          <div className="user-info">
+            <span className="user-email" title={user.email}>{user.email.split('@')[0]}</span>
+            <span className={`user-badge ${role === 'manager' ? 'badge-manager' : 'badge-partner'}`}>
+              {role === 'manager' ? 'Gerente' : 'Parceiro'}
+            </span>
+          </div>
+          <button onClick={() => signOut(auth)} className="btn-logout" title="Sair"><LogOut size={20} /></button>
         </div>
       </header>
 
-      {/* Área Principal de Renderização */}
-      <main className="max-w-3xl mx-auto">
+      {pendingDraft && view !== 'form' && (
+        <div className="draft-bar hide-print">
+          <div className="draft-text">
+            <RotateCcw size={16} />
+            <span>Você tinha um registro em andamento{pendingDraft.formLocation ? ` em ${pendingDraft.formLocation}` : ''}.</span>
+          </div>
+          <div className="draft-actions">
+            <button onClick={() => restoreDraft(pendingDraft)}>Retomar</button>
+            <button className="ghost" onClick={discardDraft}>Descartar</button>
+          </div>
+        </div>
+      )}
+
+      <main className="app-main">
         {view === 'dashboard' && (
-          <div className="p-4 flex flex-col gap-5 animate-[fadeIn_0.3s_ease-out_forwards]">
-            <h2 className="text-xl font-bold text-slate-800 border-b border-slate-200 pb-2">Painel de Resumo</h2>
-            <div className="grid grid-cols-2 gap-4">
-              <div className="bg-white p-4 rounded-xl border border-slate-200 flex flex-col items-center justify-center shadow-sm">
-                <span className="text-3xl font-bold text-slate-800">{items.length}</span>
-                <span className="text-xs font-semibold text-slate-500 mt-1 text-center">Total Itens</span>
+          <div className="page-container fade-in">
+            <h2 className="section-title">Painel de Resumo</h2>
+
+            {(roleSource === 'fallback' || roleSource === 'error') && (
+              <div className="role-warning">
+                <strong>Perfil não confirmado no banco.</strong> O app está te tratando como gerente
+                pela lista interna, mas não encontrou o documento <code>{userEmail}</code> na coleção
+                <code>roles</code>. Enquanto isso, aprovar e excluir vão falhar.
               </div>
-              <div className="bg-white p-4 rounded-xl border border-slate-200 flex flex-col items-center justify-center shadow-sm">
-                <span className="text-3xl font-bold text-emerald-500">{items.filter(i => i.managerApproved).length}</span>
-                <span className="text-xs font-semibold text-slate-500 mt-1 text-center">Concluídos</span>
+            )}
+
+            <div className="stats-grid">
+              <div className="stat-card">
+                <span className="stat-value">{items.length}</span>
+                <span className="stat-label">Total Itens</span>
+              </div>
+              <div className="stat-card">
+                <span className="stat-value text-green">{approvedCount}</span>
+                <span className="stat-label">Concluídos</span>
               </div>
             </div>
+
+            {role !== 'manager' && visibleProjects.length === 0 && (
+              <div className="role-warning">
+                <strong>Nenhuma obra liberada para o seu acesso ainda.</strong> Peça ao gerente de
+                obras para autorizar o e-mail <strong>{userEmail}</strong> na obra correspondente.
+              </div>
+            )}
+
+            {role !== 'manager' && visibleProjects.length > 0 && (
+              <p className="text-muted" style={{ fontSize: '13px' }}>
+                Números referentes apenas às obras liberadas para o seu acesso.
+              </p>
+            )}
           </div>
         )}
-        
+
         {view === 'projects' && (
-          <div className="p-4 flex flex-col gap-5 animate-[fadeIn_0.3s_ease-out_forwards]">
-            <h2 className="text-xl font-bold text-slate-800 border-b border-slate-200 pb-2">Selecione a Obra</h2>
-            <div className="flex flex-col gap-3">
+          <div className="page-container fade-in">
+            <h2 className="section-title">Selecione a Obra</h2>
+            <div className="list-group">
               {visibleProjects.map(p => {
                 const isCustom = customProjects.some(cp => cp.id === p.id);
                 return (
-                  <div key={p.id} className="flex bg-white rounded-xl border border-slate-200 overflow-hidden shadow-sm hover:border-indigo-400 transition-colors">
-                    <button className="flex-1 flex items-center text-left p-4 bg-transparent" onClick={() => { setSelectedProject(p); setView('stages'); }}>
-                      <span className="text-indigo-600 mr-3"><Building2 size={24} /></span> 
-                      <span className="text-base font-semibold text-slate-700">{p.name}</span>
+                  <div key={p.id} className="list-item-wrapper">
+                    <button className="list-item" onClick={() => { setSelectedProject(p); setView('stages'); }}>
+                      <span className="icon-blue"><Building2 size={24} /></span> {p.name}
                     </button>
                     {isCustom && role === 'manager' && (
-                      <button onClick={() => { if(window.confirm(`Excluir permanentemente a obra "${p.name}" e todas as suas permissões?`)) deleteDoc(doc(db, 'custom_projects', p.id)); }} className="px-5 bg-red-50 text-red-500 hover:text-red-600 border-l border-slate-200"><Trash2 size={20}/></button>
+                      <button onClick={() => deleteProjectCascade(p)} className="btn-delete-item" title="Excluir obra">
+                        <Trash2 size={20} />
+                      </button>
                     )}
                   </div>
                 );
               })}
+              {visibleProjects.length === 0 && <p className="empty-state">Nenhuma obra liberada para o seu acesso.</p>}
               {role === 'manager' && (
-                <button className="flex items-center justify-center p-4 rounded-xl border-2 border-dashed border-slate-300 text-slate-500 font-bold hover:bg-slate-100 hover:text-slate-700 transition-colors" onClick={async () => {
-                  const name = window.prompt("Nome da nova obra (Ex: DSPO - Fachada):");
-                  if (name && name.trim()) await addDoc(collection(db, 'custom_projects'), { name: name.trim() });
+                <button className="list-item dashed" onClick={async () => {
+                  const name = window.prompt('Nome da nova obra (Ex: DSPO - Fachada):');
+                  if (name && name.trim()) {
+                    try { await addDoc(collection(db, 'custom_projects'), { name: name.trim() }); }
+                    catch (e) { alert('Erro ao criar obra: ' + e.message); }
+                  }
                 }}>
-                  + Adicionar Nova Obra
+                  <span>+ Adicionar Nova Obra</span>
                 </button>
               )}
             </div>
           </div>
         )}
 
-        {view === 'stages' && (
-          <div className="p-4 flex flex-col gap-5 animate-[fadeIn_0.3s_ease-out_forwards]">
-            <h2 className="text-xl font-bold text-slate-800 border-b border-slate-200 pb-2">{selectedProject.name} - Etapas</h2>
-            <div className="flex flex-col gap-3">
-              {[...(STAGES[selectedProject?.id] || []), ...customStages.filter(s => s.projectId === selectedProject?.id)].map(s => {
+        {view === 'stages' && selectedProject && (
+          <div className="page-container fade-in">
+            <h2 className="section-title">{selectedProject.name} - Etapas</h2>
+            <div className="list-group">
+              {[...(STAGES[selectedProject.id] || []), ...customStages.filter(s => s.projectId === selectedProject.id)].map(s => {
                 const isCustom = customStages.some(cs => cs.id === s.id);
                 return (
-                  <div key={s.id} className="flex bg-white rounded-xl border border-slate-200 overflow-hidden shadow-sm hover:border-indigo-400 transition-colors">
-                    <button className="flex-1 text-left p-4 font-semibold text-slate-700 bg-transparent" onClick={() => { setSelectedStage(s); setView('locations'); }}>{s.name}</button>
+                  <div key={s.id} className="list-item-wrapper">
+                    <button className="list-item" onClick={() => { setSelectedStage(s); setView('locations'); }}>{s.name}</button>
                     {isCustom && role === 'manager' && (
-                      <button onClick={() => { if(window.confirm(`Excluir permanentemente a etapa "${s.name}"?`)) deleteDoc(doc(db, 'custom_stages', s.id)); }} className="px-5 bg-red-50 text-red-500 hover:text-red-600 border-l border-slate-200"><Trash2 size={20}/></button>
+                      <button onClick={() => deleteStageCascade(s)} className="btn-delete-item" title="Excluir etapa">
+                        <Trash2 size={20} />
+                      </button>
                     )}
                   </div>
                 );
               })}
               {role === 'manager' && (
-                <button className="flex items-center justify-center p-4 rounded-xl border-2 border-dashed border-slate-300 text-slate-500 font-bold hover:bg-slate-100 hover:text-slate-700 transition-colors" onClick={async () => {
-                  const name = window.prompt("Nome da nova etapa (Ex: Pavimento 1):");
-                  if (name && name.trim()) await addDoc(collection(db, 'custom_stages'), { projectId: selectedProject.id, name: name.trim() });
+                <button className="list-item dashed" onClick={async () => {
+                  const name = window.prompt('Nome da nova etapa (Ex: Pavimento 1):');
+                  if (name && name.trim()) {
+                    try { await addDoc(collection(db, 'custom_stages'), { projectId: selectedProject.id, name: name.trim() }); }
+                    catch (e) { alert('Erro ao criar etapa: ' + e.message); }
+                  }
                 }}>
-                  + Adicionar Nova Etapa
+                  <span>+ Adicionar Nova Etapa</span>
                 </button>
               )}
             </div>
           </div>
         )}
 
-        {view === 'locations' && (
-          <div className="p-4 flex flex-col gap-5 animate-[fadeIn_0.3s_ease-out_forwards]">
-            <h2 className="text-xl font-bold text-slate-800 border-b border-slate-200 pb-2">{selectedStage.name} - Locais</h2>
-            <div className="grid grid-cols-[repeat(auto-fit,minmax(140px,1fr))] gap-3">
-              {Array.from(new Set([...(selectedStage?.locations || []), ...customLocations.filter(l => l.stageId === selectedStage?.id).map(l => l.name)])).map(l => (
-                <button key={l} className="bg-white p-5 rounded-xl border border-slate-200 font-semibold text-slate-700 text-center shadow-sm hover:bg-indigo-50 transition-colors" onClick={() => { setSelectedLocation(l); setView('list'); }}>{l}</button>
+        {view === 'locations' && selectedStage && (
+          <div className="page-container fade-in">
+            <h2 className="section-title">{selectedStage.name} - Locais</h2>
+            <div className="grid-locations">
+              {Array.from(new Set([
+                ...(selectedStage.locations || []),
+                ...customLocations.filter(l => l.stageId === selectedStage.id).map(l => l.name)
+              ])).map(l => (
+                <button key={l} className="location-card" onClick={() => { setSelectedLocation(l); setView('list'); }}>{l}</button>
               ))}
               {role === 'manager' && (
-                <button className="flex items-center justify-center p-5 rounded-xl border-2 border-dashed border-slate-300 text-slate-500 font-bold hover:bg-slate-100 hover:text-slate-700 transition-colors bg-transparent" onClick={async () => {
-                  const name = window.prompt("Nome do novo local (Ex: Quarto 101):");
-                  if (name && name.trim()) await addDoc(collection(db, 'custom_locations'), { projectId: selectedProject.id, stageId: selectedStage.id, name: name.trim() });
+                <button className="location-card dashed" onClick={async () => {
+                  const name = window.prompt('Nome do novo local (Ex: Quarto 101):');
+                  if (name && name.trim()) {
+                    try {
+                      await addDoc(collection(db, 'custom_locations'), {
+                        projectId: selectedProject.id, stageId: selectedStage.id, name: name.trim()
+                      });
+                    } catch (e) { alert('Erro ao criar local: ' + e.message); }
+                  }
                 }}>
-                  + Novo Local
+                  <span>+ Novo Local</span>
                 </button>
               )}
             </div>
@@ -527,77 +1373,80 @@ export default function App() {
         )}
 
         {view === 'list' && renderList()}
-        {view === 'settings' && renderSettings()}
-        
-        {/* Formulário de Novo/Editar Item */}
+        {view === 'settings' && role === 'manager' && renderSettings()}
+
         {view === 'form' && !isMarking && (() => {
-          const availableFormStages = formProject ? [...(STAGES[formProject] || []), ...customStages.filter(s => s.projectId === formProject)] : [];
+          const availableFormStages = formProject
+            ? [...(STAGES[formProject] || []), ...customStages.filter(s => s.projectId === formProject)]
+            : [];
           const selectedFormStageObj = availableFormStages.find(s => s.id === formStage);
-          const availableFormLocations = Array.from(new Set([...(selectedFormStageObj?.locations || []), ...customLocations.filter(l => l.stageId === formStage).map(l => l.name)]));
+          const availableFormLocations = Array.from(new Set([
+            ...(selectedFormStageObj?.locations || []),
+            ...customLocations.filter(l => l.stageId === formStage).map(l => l.name)
+          ]));
+          const formProjects = role === 'manager' ? ALL_PROJECTS : visibleProjects;
 
           return (
-            <div className="p-4 flex flex-col gap-5 animate-[fadeIn_0.3s_ease-out_forwards]">
-              <h2 className="text-xl font-bold text-slate-800 border-b border-slate-200 pb-2">{editingId ? 'Editar Registro' : 'Novo Registro'}</h2>
-              <div className="bg-white p-5 rounded-xl border border-slate-200 shadow-sm flex flex-col gap-4">
-                
-                <div className="flex gap-2 w-full">
-                  <div className="flex-1 flex flex-col gap-1.5">
-                    <label className="text-sm font-semibold text-slate-700">Obra</label>
-                    <select className="p-3 border border-slate-300 rounded-lg outline-none text-base bg-white focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100" value={formProject} onChange={e => { setFormProject(e.target.value); setFormStage(''); setFormLocation(''); }}>
+            <div className="page-container fade-in">
+              <h2 className="section-title">{editingItem ? 'Editar Registro' : 'Novo Registro'}</h2>
+              <div className="form-card">
+
+                <div className="form-group" style={{ display: 'flex', gap: '8px' }}>
+                  <div style={{ flex: 1 }}>
+                    <label className="form-label">Obra</label>
+                    <select className="form-input" value={formProject} onChange={e => { setFormProject(e.target.value); setFormStage(''); setFormLocation(''); }}>
                       <option value="">Selecione...</option>
-                      {ALL_PROJECTS.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
+                      {formProjects.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
                     </select>
                   </div>
-                  <div className="flex-1 flex flex-col gap-1.5">
-                    <label className="text-sm font-semibold text-slate-700">Etapa</label>
-                    <select className="p-3 border border-slate-300 rounded-lg outline-none text-base bg-white focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100" value={formStage} onChange={e => { setFormStage(e.target.value); setFormLocation(''); }} disabled={!formProject}>
+                  <div style={{ flex: 1 }}>
+                    <label className="form-label">Etapa</label>
+                    <select className="form-input" value={formStage} onChange={e => { setFormStage(e.target.value); setFormLocation(''); }} disabled={!formProject}>
                       <option value="">Selecione...</option>
                       {availableFormStages.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
                     </select>
                   </div>
                 </div>
 
-                <div className="flex flex-col gap-1.5">
-                  <label className="text-sm font-semibold text-slate-700">Local / Apartamento</label>
-                  <select className="p-3 border border-slate-300 rounded-lg outline-none text-base bg-white focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100" value={formLocation} onChange={e => setFormLocation(e.target.value)} disabled={!formStage}>
+                <div className="form-group">
+                  <label className="form-label">Local / Apartamento</label>
+                  <select className="form-input" value={formLocation} onChange={e => setFormLocation(e.target.value)} disabled={!formStage}>
                     <option value="">Selecione o Local...</option>
                     {availableFormLocations.map(l => <option key={l} value={l}>{l}</option>)}
                   </select>
                 </div>
 
-                <div className="mt-2">
-                  {photo ? (
-                    <div className="relative w-full h-48 bg-black rounded-xl overflow-hidden shadow-inner flex items-center justify-center">
-                      <img src={photo} alt="Preview" className="max-w-full max-h-full object-contain" />
-                      <button onClick={() => setIsMarking(true)} className="absolute bottom-3 left-1/2 -translate-x-1/2 bg-blue-500 hover:bg-blue-600 text-white px-4 py-2 rounded-full font-bold flex items-center gap-2 shadow-lg transition-transform hover:scale-105"><PaintBucket size={16}/> Marcar Foto</button>
-                      <button onClick={() => setPhoto(null)} className="absolute top-3 right-3 bg-black/60 text-white p-2 rounded-full hover:bg-black/80 transition-colors"><X size={16}/></button>
+                <div className="form-group" style={{ marginTop: '16px' }}>
+                  {loadingPhoto ? (
+                    <div className="photo-upload-area"><div className="photo-placeholder"><span>Carregando foto...</span></div></div>
+                  ) : photo ? (
+                    <div className="photo-preview-wrapper">
+                      <img src={photo} alt="Pré-visualização" />
+                      <button onClick={() => setIsMarking(true)} className="btn-mark"><PaintBucket size={16} /> Marcar Foto</button>
+                      <button onClick={() => { setPhoto(null); setPhotoDirty(true); }} className="btn-photo-remove"><X size={16} /></button>
                     </div>
                   ) : (
-                    <div className="relative w-full aspect-video bg-slate-100 border-2 border-dashed border-slate-300 rounded-xl overflow-hidden flex flex-col items-center justify-center text-slate-400 hover:bg-slate-50 transition-colors">
-                      <div className="flex flex-col items-center gap-2 pointer-events-none">
-                        <Camera size={48}/>
-                        <span className="font-semibold text-sm">Tirar Foto ou Galeria</span>
-                      </div>
-                      <input type="file" accept="image/*" capture="environment" onChange={handlePhotoUpload} className="absolute inset-0 w-full h-full opacity-0 cursor-pointer" />
-                    </div>
+                    <button className="photo-upload-area" onClick={() => { setCameraError(''); setCameraOn(true); }}>
+                      <div className="photo-placeholder"><Camera size={48} /><span>Tirar Foto ou Galeria</span></div>
+                    </button>
                   )}
                 </div>
-                
-                <div className="flex flex-col gap-1.5">
-                  <label className="text-sm font-semibold text-slate-700">Descrição</label>
-                  <textarea className="p-3 border border-slate-300 rounded-lg outline-none text-base bg-white focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100 resize-y min-h-[80px]" placeholder="Descreva o problema..." value={description} onChange={e => setDescription(e.target.value)} rows="3" />
+
+                <div className="form-group">
+                  <label className="form-label">Descrição</label>
+                  <textarea className="form-input" placeholder="Descreva o problema..." value={description} onChange={e => setDescription(e.target.value)} rows="3" />
                 </div>
-                
-                <div className="flex flex-col gap-1.5 mb-2">
-                  <label className="text-sm font-semibold text-slate-700">Disciplina</label>
-                  <select className="p-3 border border-slate-300 rounded-lg outline-none text-base bg-white focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100" value={discipline} onChange={e => setDiscipline(e.target.value)}>
+
+                <div className="form-group" style={{ marginBottom: '24px' }}>
+                  <label className="form-label">Disciplina</label>
+                  <select className="form-input" value={discipline} onChange={e => setDiscipline(e.target.value)}>
                     <option value="">Selecione...</option>
                     {DISCIPLINES.map(d => <option key={d} value={d}>{d}</option>)}
                   </select>
                 </div>
-                
-                <button onClick={saveItem} className="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-bold p-4 rounded-xl shadow-md transition-transform active:scale-95 text-base">
-                  {editingId ? 'Salvar Alterações' : 'Salvar Vistoria'}
+
+                <button onClick={saveItem} className="btn-primary" disabled={saving}>
+                  {saving ? 'Salvando...' : (editingItem ? 'Salvar Alterações' : 'Salvar Vistoria')}
                 </button>
               </div>
             </div>
@@ -605,28 +1454,24 @@ export default function App() {
         })()}
       </main>
 
-      {/* Floating Action Button */}
-      {view === 'list' && !isMarking && (
-         <button className="print:hidden fixed bottom-[90px] left-1/2 -translate-x-1/2 w-auto px-6 h-12 bg-amber-400 text-slate-900 rounded-full flex items-center justify-center gap-2 shadow-lg shadow-amber-400/40 z-20 transition-transform active:translate-y-0.5 font-bold text-[15px] whitespace-nowrap hover:bg-amber-300" onClick={handleNewItem}>
-           <Camera size={20}/> Nova Vistoria
-         </button>
+      {view === 'list' && !isMarking && !lightbox && !cameraOn && (
+        <button className="fab-btn hide-print" onClick={handleNewItem}><Camera size={20} /></button>
       )}
 
-      {/* Barra de Navegação Inferior */}
-      {!isMarking && (
-        <nav className="print:hidden fixed bottom-0 left-0 w-full bg-white border-t border-slate-200 flex justify-around py-3 pb-5 z-20 shadow-[0_-4px_6px_-1px_rgba(0,0,0,0.05)]">
-          <button onClick={() => { setView('dashboard'); setSelectedProject(null); setSelectedStage(null); setSelectedLocation(null); }} className={`flex flex-col items-center gap-1 w-20 transition-colors ${view === 'dashboard' ? 'text-indigo-600' : 'text-slate-400'}`}>
-            <BarChart3 size={24}/><span className="text-[10px] font-bold uppercase tracking-wider">Status</span>
+      {!isMarking && !cameraOn && (
+        <nav className="bottom-nav hide-print">
+          <button onClick={() => goTo('dashboard')} className={view === 'dashboard' ? 'active' : ''}>
+            <BarChart3 size={24} /><span>Status</span>
           </button>
-          <button onClick={() => { setView('projects'); setSelectedProject(null); setSelectedStage(null); setSelectedLocation(null); }} className={`flex flex-col items-center gap-1 w-20 transition-colors ${['projects', 'stages', 'locations'].includes(view) ? 'text-indigo-600' : 'text-slate-400'}`}>
-            <Building2 size={24}/><span className="text-[10px] font-bold uppercase tracking-wider">Obras</span>
+          <button onClick={() => goTo('projects')} className={['projects', 'stages', 'locations'].includes(view) ? 'active' : ''}>
+            <Building2 size={24} /><span>Obras</span>
           </button>
-          <button onClick={() => { setView('list'); setSelectedProject(null); setSelectedStage(null); setSelectedLocation(null); }} className={`flex flex-col items-center gap-1 w-20 transition-colors ${['list', 'form'].includes(view) ? 'text-indigo-600' : 'text-slate-400'}`}>
-            <FileText size={24}/><span className="text-[10px] font-bold uppercase tracking-wider">Checklists</span>
+          <button onClick={() => goTo('list')} className={['list', 'form'].includes(view) ? 'active' : ''}>
+            <FileText size={24} /><span>Checklists</span>
           </button>
           {role === 'manager' && (
-            <button onClick={() => { setView('settings'); setSelectedProject(null); setSelectedStage(null); setSelectedLocation(null); }} className={`flex flex-col items-center gap-1 w-20 transition-colors ${view === 'settings' ? 'text-indigo-600' : 'text-slate-400'}`}>
-              <Settings size={24}/><span className="text-[10px] font-bold uppercase tracking-wider">Config</span>
+            <button onClick={() => goTo('settings')} className={view === 'settings' ? 'active' : ''}>
+              <Settings size={24} /><span>Config</span>
             </button>
           )}
         </nav>
