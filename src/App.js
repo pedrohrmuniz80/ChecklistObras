@@ -179,6 +179,10 @@ export default function App() {
   const [configProject, setConfigProject] = useState(null);
   const [newPartnerEmail, setNewPartnerEmail] = useState('');
 
+  // true = cheguei na lista navegando por Obras → Etapa → Local (os filtros
+  // ficam escondidos porque o caminho já definiu o recorte).
+  // false = entrei pela aba Checklists, e aí quero todos os filtros à mão.
+  const [drillMode, setDrillMode] = useState(false);
   const [statusFilter, setStatusFilter] = useState('all');
   const [pickedDisciplines, setPickedDisciplines] = useState([]);  // vazio = todas
   const [visibleCount, setVisibleCount] = useState(PAGE_SIZE);
@@ -966,6 +970,13 @@ export default function App() {
       ? [...(STAGES[selectedProject.id] || []), ...customStages.filter(s => s.projectId === selectedProject.id)]
       : [];
 
+    const availableLocations = selectedStage
+      ? Array.from(new Set([
+        ...(selectedStage.locations || []),
+        ...customLocations.filter(l => l.stageId === selectedStage.id).map(l => l.name)
+      ]))
+      : [];
+
     const doneCount = filteredItems.filter(i => i.managerApproved).length;
     const shownItems = filteredItems.slice(0, visibleCount);
     const remaining = filteredItems.length - shownItems.length;
@@ -1011,23 +1022,36 @@ export default function App() {
         <div className="filter-panel hide-print">
           <div className="filter-title"><Filter size={16} /> Buscar Vistorias</div>
           <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
-            {!selectedLocation && (
-              <div style={{ display: 'flex', gap: '8px' }}>
-                <select style={{ flex: 1 }} value={selectedProject?.id || 'all'} onChange={e => {
-                  const p = ALL_PROJECTS.find(x => x.id === e.target.value);
-                  setSelectedProject(p || null); setSelectedStage(null); setSelectedLocation(null);
-                }}>
-                  <option value="all">Todas as Obras</option>
-                  {visibleProjects.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
+            {!drillMode && (
+              <>
+                <div style={{ display: 'flex', gap: '8px' }}>
+                  <select style={{ flex: 1 }} value={selectedProject?.id || 'all'} onChange={e => {
+                    const p = ALL_PROJECTS.find(x => x.id === e.target.value);
+                    setSelectedProject(p || null); setSelectedStage(null); setSelectedLocation(null);
+                  }}>
+                    <option value="all">Todas as Obras</option>
+                    {visibleProjects.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
+                  </select>
+                  <select style={{ flex: 1 }} value={selectedStage?.id || 'all'} onChange={e => {
+                    const s = availableStages.find(x => x.id === e.target.value);
+                    setSelectedStage(s || null); setSelectedLocation(null);
+                  }} disabled={!selectedProject}>
+                    <option value="all">Todas as Etapas</option>
+                    {availableStages.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
+                  </select>
+                </div>
+
+                <select
+                  value={selectedLocation || 'all'}
+                  onChange={e => setSelectedLocation(e.target.value === 'all' ? null : e.target.value)}
+                  disabled={!selectedStage}
+                >
+                  <option value="all">
+                    {selectedStage ? 'Todos os Locais' : 'Todos os Locais (escolha a etapa primeiro)'}
+                  </option>
+                  {availableLocations.map(l => <option key={l} value={l}>{l}</option>)}
                 </select>
-                <select style={{ flex: 1 }} value={selectedStage?.id || 'all'} onChange={e => {
-                  const s = availableStages.find(x => x.id === e.target.value);
-                  setSelectedStage(s || null); setSelectedLocation(null);
-                }} disabled={!selectedProject}>
-                  <option value="all">Todas as Etapas</option>
-                  {availableStages.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
-                </select>
-              </div>
+              </>
             )}
 
             <select value={statusFilter} onChange={e => setStatusFilter(e.target.value)}>
@@ -1123,8 +1147,8 @@ export default function App() {
 
   const handleBack = () => {
     if (view === 'form') setView('list');
-    else if (view === 'list' && selectedLocation) { setSelectedLocation(null); setView('locations'); }
-    else if (view === 'list' && !selectedLocation) setView('projects');
+    else if (view === 'list' && drillMode && selectedLocation) { setSelectedLocation(null); setView('locations'); }
+    else if (view === 'list') setView('projects');
     else if (view === 'locations') { setSelectedStage(null); setView('stages'); }
     else if (view === 'stages') { setSelectedProject(null); setView('projects'); }
     else if (view === 'settings') setView('dashboard');
@@ -1132,6 +1156,7 @@ export default function App() {
 
   const goTo = (nextView) => {
     setView(nextView);
+    setDrillMode(false);
     setSelectedProject(null); setSelectedStage(null); setSelectedLocation(null);
   };
 
@@ -1209,7 +1234,7 @@ export default function App() {
 
       <header className="app-header hide-print">
         <div className="header-left">
-          {view !== 'dashboard' && view !== 'projects' && !isMarking && (
+          {view !== 'dashboard' && view !== 'projects' && !(view === 'list' && !drillMode) && !isMarking && (
             <button onClick={handleBack} className="back-btn"><ArrowLeft size={20} /></button>
           )}
           <h1 className="app-title">Vistoria<span>PRO</span></h1>
@@ -1352,7 +1377,7 @@ export default function App() {
                 ...(selectedStage.locations || []),
                 ...customLocations.filter(l => l.stageId === selectedStage.id).map(l => l.name)
               ])).map(l => (
-                <button key={l} className="location-card" onClick={() => { setSelectedLocation(l); setView('list'); }}>{l}</button>
+                <button key={l} className="location-card" onClick={() => { setSelectedLocation(l); setDrillMode(true); setView('list'); }}>{l}</button>
               ))}
               {role === 'manager' && (
                 <button className="location-card dashed" onClick={async () => {
